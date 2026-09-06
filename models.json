@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "default_provider": "gemini",
+  "models": [
+    {
+      "name": "gemini-pro",
+      "display_name": "Gemini Pro (Web)",
+      "provider": "gemini",
+      "system_prompt": "Você é um assistente útil. Responda de forma concisa e direta.",
+      "template": "[INST] {{ .System }} [/INST]\n\n{{ .Prompt }}",
+      "streaming": false,
+      "options": { "temperature": 0.7, "num_predict": 2048, "num_ctx": 32768 }
+    },
+    {
+      "name": "claude-sonnet",
+      "display_name": "Claude Sonnet (Web)",
+      "provider": "claude",
+      "system_prompt": "Você é um assistente de IA. Responda com clareza.",
+      "template": "{{ .System }}\n\n{{ .Prompt }}",
+      "streaming": true,
+      "options": { "temperature": 1.0, "num_predict": 4096 }
+    },
+    {
+      "name": "copilot-365",
+      "display_name": "Microsoft 365 Copilot (Web)",
+      "provider": "copilot365",
+      "system_prompt": "Assistente profissional da Microsoft 365.",
+      "streaming": false,
+      "options": {}
+    },
+    {
+      "name": "chatgpt",
+      "display_name": "ChatGPT (Web)",
+      "provider": "chatgpt",
+      "system_prompt": "Você é ChatGPT, um assistente útil.",
+      "streaming": false,
+      "options": {}
+    }
+  ]
+}

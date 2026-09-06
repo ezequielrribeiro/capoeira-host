@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "CapoeiraHost Bridge",
+  "version": "1.0.0",
+  "description": "Ponte WebSocket entre o CapoeiraHost (API Ollama local) e UIs Web de LLMs.",
+  "permissions": ["activeTab"],
+  "host_permissions": [
+    "ws://127.0.0.1:8766/*",
+    "*://chatgpt.com/*",
+    "*://claude.ai/*",
+    "*://gemini.google.com/*",
+    "*://copilot.microsoft.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://chatgpt.com/*",
+        "*://claude.ai/*",
+        "*://gemini.google.com/*",
+        "*://copilot.microsoft.com/*"
+      ],
+      "js": [
+        "adapters/base.js",
+        "adapters/gemini.js",
+        "adapters/claude.js",
+        "content.js"
+      ]
+    }
+  ]
+}
