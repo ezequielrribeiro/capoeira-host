@@ -5,6 +5,22 @@ LLMs Web (Gemini, Claude, ChatGPT, Microsoft 365 Copilot) através de uma
 **extensão de navegador (Chrome MV3)** — sem baixar modelos, sem chave de API,
 reaproveitando a sessão autenticada da sua conta no navegador.
 
+> **⚠️ Disclaimer**
+>
+> Esta ferramenta é voltada, principalmente, para **pequenas requisições**: testes
+> pontuais, scripts simples e uso interativo. Ela depende da interface Web dos
+> LLMs (Gemini, Claude, Copilot…), que é feita para uso humano interativo, **um
+> turno por vez**.
+>
+> **Evite integrá-la a ferramentas de desenvolvimento avançadas** (como Opencode
+> e afins, agentes de terminal, autocomplete contínuo…). Essas soluções
+> demandam uma conexão mais robusta e constante com o modelo e realizam
+> **diversas requisições**, ficando passíveis de **bloqueio dos serviços**
+> (rate-limit, CAPTCHA, suspensão de conta) e de lentidão/instabilidade por causa
+> da fila FIFO de 1 requisição por vez.
+>
+> Use a ferramenta para chamadas pontuais e de baixo volume.
+
 ## Como funciona
 
 ```
@@ -199,6 +215,10 @@ Base URL: `http://127.0.0.1:8765`
 ## Usar com clientes do ecossistema Ollama
 
 Qualquer aplicação que fale com `ollama serve` funciona apontando para esta API:
+
+> ⚠️ Client **somente em modo interativo/simples**. Não use agentes, autocomplete
+> contínuo ou ferramentas de desenvolvimento avançadas (OpenCode, Continue em
+> modo agente, etc.) — o volume de requisições pode levar ao bloqueio dos serviços.
 
 ```bash
 # Open WebUI, Continue, LibreChat...
