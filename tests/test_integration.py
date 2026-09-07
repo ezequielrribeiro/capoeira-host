@@ -42,6 +42,14 @@ def models_file(tmp_path):
                         "streaming": True,
                         "options": {"temperature": 1.0},
                     },
+                    {
+                        "name": "copilot-365",
+                        "display_name": "Microsoft 365 Copilot (Web)",
+                        "provider": "copilot365",
+                        "system_prompt": "Assistente profissional da Microsoft 365.",
+                        "streaming": False,
+                        "options": {},
+                    },
                 ],
             },
             ensure_ascii=False,
@@ -175,7 +183,7 @@ def test_tags_lists_profiles(app):
         resp = client.get("/api/tags")
         assert resp.status_code == 200
         names = {m["name"] for m in resp.json()["models"]}
-        assert names == {"gemini-pro", "claude-sonnet"}
+        assert names == {"gemini-pro", "claude-sonnet", "copilot-365"}
 
 
 def test_chat_without_bridge_returns_503(app):
@@ -292,3 +300,52 @@ def test_bridge_rejects_unknown_origin(app):
     except Exception:
         thread.join(timeout=10)
         raise
+
+
+# --------------------------- Copilot 365 (m365.cloud.microsoft) ---------------------------
+
+
+def test_bridge_accepts_m365_copilot_origin(app):
+    thread, ctx = start_fake_bridge(
+        "copilot365",
+        "Sou o Copilot da Microsoft 365.",
+        origin="https://m365.cloud.microsoft",
+    )
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {
+                    "model": "copilot-365",
+                    "messages": [{"role": "user", "content": "Quem é você?"}],
+                },
+            )
+            assert resp.status_code == 200
+            assert resp.json()["message"]["content"] == "Sou o Copilot da Microsoft 365."
+            assert ctx["received"], "bridge rejeitou a origem de m365.cloud.microsoft"
+            assert ctx["error"] is None
+    finally:
+        thread.join(timeout=10)
+
+
+def test_chat_via_copilot365_bridge(app):
+    thread, ctx = start_fake_bridge("copilot365", "Resposta do Copilot 365.")
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {
+                    "model": "copilot-365",
+                    "messages": [{"role": "user", "content": "Oi Copilot"}],
+                },
+            )
+            assert resp.status_code == 200
+            assert resp.json()["message"]["content"] == "Resposta do Copilot 365."
+            assert ctx["received"]
+            payload = ctx["received"][0]["payload"]
+            assert payload["provider"] == "copilot365"
+            assert payload["newChat"] is True
+    finally:
+        thread.join(timeout=10)

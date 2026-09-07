@@ -15,7 +15,7 @@ ALLOWED_ORIGINS = [
     None,  # conexões sem Origin (testes locais / SPA)
     re.compile(r"^chrome-extension://"),
     re.compile(
-        r"^https://(gemini\.google\.com|claude\.ai|chatgpt\.com|copilot\.microsoft\.com)$"
+        r"^https://(gemini\.google\.com|claude\.ai|chatgpt\.com|m365\.cloud\.microsoft)$"
     ),
     re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"),
 ]

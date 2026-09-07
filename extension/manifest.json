@@ -9,7 +9,7 @@
     "*://chatgpt.com/*",
     "*://claude.ai/*",
     "*://gemini.google.com/*",
-    "*://copilot.microsoft.com/*"
+    "*://m365.cloud.microsoft/*"
   ],
   "content_scripts": [
     {
@@ -17,12 +17,13 @@
         "*://chatgpt.com/*",
         "*://claude.ai/*",
         "*://gemini.google.com/*",
-        "*://copilot.microsoft.com/*"
+        "*://m365.cloud.microsoft/*"
       ],
       "js": [
         "adapters/base.js",
         "adapters/gemini.js",
         "adapters/claude.js",
+        "adapters/copilot365.js",
         "content.js"
       ]
     }

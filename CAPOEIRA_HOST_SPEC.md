@@ -377,7 +377,7 @@ Adaptação: cria/atualiza um perfil no registry (não baixa pesos).
   (ex.: `https://gemini.google.com`), não com `chrome-extension://`. A allowlist aceita:
   ausência de `Origin` (testes locais/SPA), `chrome-extension://<id>`, as páginas dos provedores
   (`https://gemini.google.com`, `https://claude.ai`, `https://chatgpt.com`,
-  `https://copilot.microsoft.com`) e origens locais (`http(s)://localhost[:porta]` /
+  `https://m365.cloud.microsoft`) e origens locais (`http(s)://localhost[:porta]` /
   `127.0.0.1[:porta]`). Origens desconhecidas → handshake rejeitado (`403`).
 - **Private Network Access (Chrome):** uma página pública conectando à rede privada
   (`ws://127.0.0.1:8766`) exige no handshake `Access-Control-Allow-Private-Network: true` —
@@ -514,6 +514,12 @@ window.registerAdapter({
 });
 ```
 
+> **Hook opcional `isGenerating()`**: quando o provedor não expõe um seletor CSS
+> estável para o indicador de geração (ex.: um único botão que alterna entre os
+> ícones de enviar/parar, como no Copilot 365), o adapter pode fornecer
+> `async isGenerating() -> boolean`. O `content.js` prefere esse hook ao seletor
+> `stopGeneratingIndicator` quando presente (retrocompatível com os demais adapters).
+
 ### 7.2. Provedores suportados (inicial)
 
 | Adapter | Host | Observações |
@@ -521,7 +527,7 @@ window.registerAdapter({
 | `gemini.js` | `gemini.google.com` | Default do projeto — implementado e **carregado** no `manifest.json` |
 | `claude.js` | `claude.ai` | Implementado e **carregado**; `supportsStreaming: true` (delta incremental via polling) |
 | `chatgpt.js` | `chatgpt.com` | Implementado, mas **não carregado** no `manifest.json` (provider fica offline → `503`) |
-| `copilot365.js` | `copilot.microsoft.com` / M365 | Em planejamento — `injectText` lança "não implementado" |
+| `copilot365.js` | `m365.cloud.microsoft/chat` | Implementado e **carregado**; usa o hook `isGenerating()` (botão único enviar/parar) |
 
 ### 7.3. `manifest.json` (essencial)
 
@@ -537,7 +543,7 @@ window.registerAdapter({
     "*://chatgpt.com/*",
     "*://claude.ai/*",
     "*://gemini.google.com/*",
-    "*://copilot.microsoft.com/*"
+    "*://m365.cloud.microsoft/*"
   ],
   "content_scripts": [
     {
@@ -545,9 +551,9 @@ window.registerAdapter({
         "*://chatgpt.com/*",
         "*://claude.ai/*",
         "*://gemini.google.com/*",
-        "*://copilot.microsoft.com/*"
+        "*://m365.cloud.microsoft/*"
       ],
-      "js": ["adapters/base.js", "adapters/gemini.js", "adapters/claude.js", "content.js"]
+      "js": ["adapters/base.js", "adapters/gemini.js", "adapters/claude.js", "adapters/copilot365.js", "content.js"]
     }
   ]
 }
@@ -625,7 +631,7 @@ capoeira-host/
 │       ├── gemini.js         # implementado e carregado
 │       ├── claude.js         # implementado e carregado
 │       ├── chatgpt.js        # implementado, não carregado no manifest
-│       └── copilot365.js     # em planejamento
+│       └── copilot365.js     # implementado e carregado (m365.cloud.microsoft/chat)
 ├── tests/
 │   └── test_integration.py   # suíte de integração (TestClient + WebSocket fake)
 ├── conftest.py               # raiz p/ import de `server.*` no pytest
@@ -669,7 +675,7 @@ Clientes Ollama existentes (Open WebUI, `ollama` SDKs, langchain `OllamaLLM`) fu
 - **Fase 1 (Core):** HTTP+WS server, registry, `/api/generate` e `/api/chat` (não-stream) com adapter Gemini.
 - **Fase 2 (Streaming):** NDJSON replay + `STREAM_UPDATE` incremental no adapter Claude; timeouts e filas.
 - **Fase 3 (Registry CRUD):** `/api/create`/`/api/copy`/`/api/delete`/`/api/show`; persistência `models.json`.
-- **Fase 4 (Provedores):** adapters ChatGPT e Copilot 365; fallback `provider: auto` (primeiro bridge online).
+- **Fase 4 (Provedores):** adapters ChatGPT (implementado, fora do manifest) e Copilot 365 (✅ entregue em `m365.cloud.microsoft/chat`); fallback `provider: auto` (primeiro bridge online).
 
 ---
 

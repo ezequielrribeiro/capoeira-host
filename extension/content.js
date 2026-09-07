@@ -89,7 +89,10 @@
 
     const interval = setInterval(async () => {
       try {
-        const isGenerating = !!document.querySelector(sel.stopGeneratingIndicator);
+        const isGenerating =
+          typeof adapter.isGenerating === "function"
+            ? adapter.isGenerating()
+            : !!document.querySelector(sel.stopGeneratingIndicator);
         const current = await adapter.extractLastResponse();
 
         if (adapter.supportsStreaming && current && current.length > lastText.length) {

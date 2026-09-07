@@ -22,7 +22,7 @@ Extensão                              ──DOM──────────�
 - Python 3.10+
 - pip
 - Chrome ou Edge (para carregar a extensão MV3)
-- Uma conta logada em pelo menos um provedor Web (Gemini ou Claude, hoje)
+- Uma conta logada em pelo menos um provedor Web (Gemini, Claude ou Copilot 365, hoje)
 
 ## Instalação
 
@@ -63,7 +63,7 @@ Mantenha uma aba aberta e **logada** no serviço Web do modelo que você quer us
 | Gemini | `gemini.google.com` | ✅ Implementado |
 | Claude | `claude.ai` | ✅ Implementado (streaming incremental) |
 | ChatGPT | `chatgpt.com` | ⚠️ Implementado, mas **não habilitado** no `manifest.json` |
-| Copilot 365 | `copilot.microsoft.com` | ❌ Em planejamento |
+| Copilot 365 | `m365.cloud.microsoft/chat` | ✅ Implementado |
 
 > A extensão conecta ao WebSocket local automaticamente ao carregar a aba.
 > Provedores sem aba aberta aparecem como **offline** → requisições retornam `503`.
@@ -219,7 +219,7 @@ print(llm.invoke("Resuma a lei áurea em 1 frase."))
 
 | Sintoma | Causa provável | Correção |
 |---|---|---|
-| `503 no bridge available` | Extensão não carregada / aba do provedor fechada, ou servidor rodando código antigo | Recarregar `extension/`, abrir aba logada do Gemini ou Claude e **reiniciar o servidor** para aplicar mudanças no bridge |
+| `503 no bridge available` | Extensão não carregada / aba do provedor fechada, ou servidor rodando código antigo | Recarregar `extension/`, abrir aba logada do Gemini, Claude ou Copilot 365 e **reiniciar o servidor** para aplicar mudanças no bridge |
 | `422` / "Input should be a valid dictionary" | JSON não chegou como JSON (falta `Content-Type: application/json` ou quotes comidos pelo PowerShell) | Usar `smoke_test.py`, `Invoke-RestMethod -ContentType "application/json"` ou `curl --data "@body.json"` |
 | `502` com msg de seletor | A interface do provedor mudou | Revisar os seletores em `extension/adapters/*.js` |
 | `504 bridge timeout` | Provedor demorou > `CAPOEIRA_TIMEOUT` | Aumentar `CAPOEIRA_TIMEOUT` |
