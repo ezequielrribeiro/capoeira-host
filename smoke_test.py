@@ -9,6 +9,7 @@ Uso:
     python smoke_test.py
     python smoke_test.py --endpoint generate --prompt "O que é capoeira?" --stream
     python smoke_test.py --model claude-sonnet --stream
+    python smoke_test.py --endpoint chat --new-chat false
 """
 
 from __future__ import annotations
@@ -44,12 +45,16 @@ def default_base_url() -> str:
 
 def build_payload(args) -> dict:
     if args.endpoint == "generate":
-        return {"model": args.model, "prompt": args.prompt, "stream": args.stream}
-    return {
-        "model": args.model,
-        "stream": args.stream,
-        "messages": [{"role": "user", "content": args.prompt}],
-    }
+        payload = {"model": args.model, "prompt": args.prompt, "stream": args.stream}
+    else:
+        payload = {
+            "model": args.model,
+            "stream": args.stream,
+            "messages": [{"role": "user", "content": args.prompt}],
+        }
+    if args.new_chat is not None:
+        payload["new_chat"] = args.new_chat == "true"
+    return payload
 
 
 def print_json(data) -> None:
@@ -134,6 +139,12 @@ def main() -> None:
     parser.add_argument("--prompt", default="Olá! O que é capoeira? Responda em uma frase.")
     parser.add_argument("--endpoint", choices=["generate", "chat"], default="chat")
     parser.add_argument("--stream", action="store_true")
+    parser.add_argument(
+        "--new-chat",
+        choices=["true", "false"],
+        default=None,
+        help="Sobrescreve CAPOEIRA_NEW_CHAT por requisição (ausente = default do servidor).",
+    )
     args = parser.parse_args()
 
     payload = build_payload(args)
