@@ -71,6 +71,19 @@ def app(models_file):
     return create_app(settings)
 
 
+@pytest.fixture
+def app_reuse_chat(models_file):
+    settings = Settings(
+        host="127.0.0.1",
+        ws_port=WS_TEST_PORT,
+        models_file=models_file,
+        timeout=5.0,
+        queue_size=10,
+        new_chat=False,
+    )
+    return create_app(settings)
+
+
 def start_fake_bridge(provider, response_text, *, streaming=False, partials=None, origin=None):
     """Simula a extensão do navegador: conecta no WS do bridge, envia HELLO,
     aguarda SEND_PROMPT e devolve parciais (se streaming) + RESPONSE final.
@@ -347,5 +360,85 @@ def test_chat_via_copilot365_bridge(app):
             payload = ctx["received"][0]["payload"]
             assert payload["provider"] == "copilot365"
             assert payload["newChat"] is True
+    finally:
+        thread.join(timeout=10)
+
+
+# --------------------------- reutilização de chat (new_chat) ---------------------------
+
+
+def test_chat_new_chat_false_from_global_default(app_reuse_chat):
+    """Com CAPOEIRA_NEW_CHAT=false, o SEND_PROMPT não deve iniciar novo chat."""
+    thread, ctx = start_fake_bridge("gemini", "Resposta sem novo chat.")
+    try:
+        with TestClient(app_reuse_chat) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {"model": "gemini-pro", "messages": [{"role": "user", "content": "oi"}]},
+            )
+            assert resp.status_code == 200
+            assert ctx["received"]
+            assert ctx["received"][0]["payload"]["newChat"] is False
+    finally:
+        thread.join(timeout=10)
+
+
+def test_chat_new_chat_false_via_request_override(app):
+    """Campo new_chat:false por requisição sobrescreve o default global (true)."""
+    thread, ctx = start_fake_bridge("gemini", "Resposta sem novo chat.")
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {
+                    "model": "gemini-pro",
+                    "new_chat": False,
+                    "messages": [{"role": "user", "content": "oi"}],
+                },
+            )
+            assert resp.status_code == 200
+            assert ctx["received"]
+            assert ctx["received"][0]["payload"]["newChat"] is False
+    finally:
+        thread.join(timeout=10)
+
+
+def test_chat_new_chat_true_overrides_global_false(app_reuse_chat):
+    """Campo new_chat:true por requisição sobrescreve o default global (false)."""
+    thread, ctx = start_fake_bridge("gemini", "Resposta com novo chat.")
+    try:
+        with TestClient(app_reuse_chat) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {
+                    "model": "gemini-pro",
+                    "new_chat": True,
+                    "messages": [{"role": "user", "content": "oi"}],
+                },
+            )
+            assert resp.status_code == 200
+            assert ctx["received"]
+            assert ctx["received"][0]["payload"]["newChat"] is True
+    finally:
+        thread.join(timeout=10)
+
+
+def test_generate_new_chat_false_via_request_override(app):
+    """Campo new_chat:false também vale para /api/generate."""
+    thread, ctx = start_fake_bridge("gemini", "Resposta sem novo chat.")
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/generate",
+                {"model": "gemini-pro", "prompt": "oi", "new_chat": False},
+            )
+            assert resp.status_code == 200
+            assert resp.json()["response"] == "Resposta sem novo chat."
+            assert ctx["received"]
+            assert ctx["received"][0]["payload"]["newChat"] is False
     finally:
         thread.join(timeout=10)

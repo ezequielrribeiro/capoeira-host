@@ -119,19 +119,20 @@ def build_router() -> APIRouter:
         profile: Profile = registry.require(req.model)
         _require_online(bridge, profile.provider)
         deadline = time.monotonic() + settings.timeout
+        new_chat = settings.new_chat if req.new_chat is None else req.new_chat
 
         if req.stream:
 
             async def ndjson():
                 try:
-                    async for chunk in gateway.generate_chunks(profile, req, deadline):
+                    async for chunk in gateway.generate_chunks(profile, req, deadline, new_chat=new_chat):
                         yield json.dumps(chunk, ensure_ascii=False) + "\n"
                 except OllamaError as exc:
                     yield json.dumps(ErrorResponse(error=exc.message).model_dump(), ensure_ascii=False) + "\n"
 
             return StreamingResponse(ndjson(), media_type="application/x-ndjson")
 
-        text, metrics = await gateway.generate(profile, req, deadline)
+        text, metrics = await gateway.generate(profile, req, deadline, new_chat=new_chat)
         return GenerateResponse(model=profile.name, created_at=_now_dt(), response=text, **metrics)
 
     # ------------------------------------------------------------------ chat
@@ -148,19 +149,20 @@ def build_router() -> APIRouter:
         profile: Profile = registry.require(req.model)
         _require_online(bridge, profile.provider)
         deadline = time.monotonic() + settings.timeout
+        new_chat = settings.new_chat if req.new_chat is None else req.new_chat
 
         if req.stream:
 
             async def ndjson():
                 try:
-                    async for chunk in gateway.chat_chunks(profile, req, deadline):
+                    async for chunk in gateway.chat_chunks(profile, req, deadline, new_chat=new_chat):
                         yield json.dumps(chunk, ensure_ascii=False) + "\n"
                 except OllamaError as exc:
                     yield json.dumps(ErrorResponse(error=exc.message).model_dump(), ensure_ascii=False) + "\n"
 
             return StreamingResponse(ndjson(), media_type="application/x-ndjson")
 
-        content, metrics = await gateway.chat(profile, req, deadline)
+        content, metrics = await gateway.chat(profile, req, deadline, new_chat=new_chat)
         return ChatResponse(
             model=profile.name,
             created_at=_now_dt(),

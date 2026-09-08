@@ -147,6 +147,7 @@ print(r.json()["message"]["content"])
 | `CAPOEIRA_MODELS_FILE` | `./models.json` | Registry de perfis de provedor |
 | `CAPOEIRA_TIMEOUT` | `180` | Timeout (s) por requisição antes de `504` |
 | `CAPOEIRA_QUEUE` | `10` | Máximo de requisições enfileiradas por provedor |
+| `CAPOEIRA_NEW_CHAT` | `true` | Iniciar um chat novo na aba Web a cada requisição. Pode ser sobrescrito por requisição via `new_chat` no body de `/api/generate` e `/api/chat` |
 
 Exemplo:
 
@@ -193,6 +194,13 @@ Base URL: `http://127.0.0.1:8765`
 | POST | `/api/copy` | Copia um perfil existente |
 | DELETE | `/api/delete` | Remove um perfil |
 | GET | `/` `/api/version` | `{"version":"1.0.0"}` |
+
+> **Reutilizar o chat Web** — por padrão, toda requisição inicia um **novo chat** na aba
+> do provedor (`newChat: true`). Para continuar a mesma conversa (menos "pisca" e
+> contexto real na Web), defina `CAPOEIRA_NEW_CHAT=false` (global) ou envie
+> `"new_chat": false` no corpo de `/api/generate` ou `/api/chat` (por requisição; o
+> valor por requisição tem precedência). Campo exclusivo do CapoeiraHost — clientes
+> Ollama ignoram campos extras.
 
 ### Não aplicáveis (modelo não é hospedado)
 
@@ -243,7 +251,7 @@ print(llm.invoke("Resuma a lei áurea em 1 frase."))
 | `422` / "Input should be a valid dictionary" | JSON não chegou como JSON (falta `Content-Type: application/json` ou quotes comidos pelo PowerShell) | Usar `smoke_test.py`, `Invoke-RestMethod -ContentType "application/json"` ou `curl --data "@body.json"` |
 | `502` com msg de seletor | A interface do provedor mudou | Revisar os seletores em `extension/adapters/*.js` |
 | `504 bridge timeout` | Provedor demorou > `CAPOEIRA_TIMEOUT` | Aumentar `CAPOEIRA_TIMEOUT` |
-| Sem resposta e aba "piscando" | Nova conversa criada a cada requisição | Comportamento esperado (`newChat: true` por requisição) |
+| Sem resposta e aba "piscando" | Nova conversa criada a cada requisição | Comportamento esperado com `newChat: true`. Para reutilizar o mesmo chat (sem "piscar"), defina `CAPOEIRA_NEW_CHAT=false` (ou envie `"new_chat": false` na requisição) |
 | Provedor não lista em `/api/ps` | Provider sem conexão WS | Abrir/recarregar a aba do provedor |
 
 ## Testes

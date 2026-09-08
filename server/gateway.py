@@ -53,7 +53,7 @@ class Gateway:
 
     # ------------------------------------------------------------------ generate
 
-    async def generate_chunks(self, profile: Profile, req: GenerateRequest, deadline: float) -> AsyncGenerator:
+    async def generate_chunks(self, profile: Profile, req: GenerateRequest, deadline: float, new_chat: bool = True) -> AsyncGenerator:
         options = req.options.model_dump() if req.options else {}
         system = build_system_envelope(
             req.system or profile.system_prompt,
@@ -67,6 +67,7 @@ class Gateway:
             prompt,
             json_mode=(req.format == "json"),
             options=options,
+            new_chat=new_chat,
         )
         transmitted = ""
         exec_ms = 0.0
@@ -92,10 +93,10 @@ class Gateway:
                 }
                 return
 
-    async def generate(self, profile: Profile, req: GenerateRequest, deadline: float) -> tuple[str, dict]:
+    async def generate(self, profile: Profile, req: GenerateRequest, deadline: float, new_chat: bool = True) -> tuple[str, dict]:
         text = ""
         metrics: dict = {}
-        async for chunk in self.generate_chunks(profile, req, deadline):
+        async for chunk in self.generate_chunks(profile, req, deadline, new_chat=new_chat):
             if chunk.get("done"):
                 metrics = _pick_metrics(chunk)
             else:
@@ -104,7 +105,7 @@ class Gateway:
 
     # ------------------------------------------------------------------ chat
 
-    async def chat_chunks(self, profile: Profile, req: ChatRequest, deadline: float) -> AsyncGenerator:
+    async def chat_chunks(self, profile: Profile, req: ChatRequest, deadline: float, new_chat: bool = True) -> AsyncGenerator:
         options = req.options.model_dump() if req.options else {}
         system = build_system_envelope(profile.system_prompt, options, json_mode=(req.format == "json"))
         transcript = build_chat_transcript(req.messages)
@@ -117,6 +118,7 @@ class Gateway:
             json_mode=(req.format == "json"),
             options=options,
             conversation=conversation,
+            new_chat=new_chat,
         )
         transmitted = ""
         exec_ms = 0.0
@@ -141,10 +143,10 @@ class Gateway:
                 }
                 return
 
-    async def chat(self, profile: Profile, req: ChatRequest, deadline: float) -> tuple[str, dict]:
+    async def chat(self, profile: Profile, req: ChatRequest, deadline: float, new_chat: bool = True) -> tuple[str, dict]:
         content = ""
         metrics: dict = {}
-        async for chunk in self.chat_chunks(profile, req, deadline):
+        async for chunk in self.chat_chunks(profile, req, deadline, new_chat=new_chat):
             if chunk.get("done"):
                 metrics = _pick_metrics(chunk)
             else:

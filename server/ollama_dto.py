@@ -24,6 +24,7 @@ class GenerateRequest(BaseModel):
     images: list[str] | None = None
     keep_alive: Any = None
     options: Options = Options()
+    new_chat: bool | None = None
 
 
 class ChatMessage(BaseModel):
@@ -42,6 +43,7 @@ class ChatRequest(BaseModel):
     format: str | None = None
     keep_alive: Any = None
     options: Options = Options()
+    new_chat: bool | None = None
 
 
 class ShowRequest(BaseModel):

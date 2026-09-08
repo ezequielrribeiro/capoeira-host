@@ -82,7 +82,7 @@ O CapoeiraHost é **apenas um gateway de inferência**: recebe comandos Ollama e
 | Inferência local (GGUF, GPU) | Inferência *remota* na interface Web do provedor |
 | `/api/pull`, `/api/push`, blobs | **Não aplicável** → `501 Not Implemented` (modelos não são baixados) |
 | `/api/generate` | Prompt único enviado à Web (transcript simples) |
-| `/api/chat` | Conversa serializada como transcript e enviada como 1 prompt (novo chat na Web por requisição) |
+| `/api/chat` | Conversa serializada como transcript e enviada como 1 prompt (novo chat na Web por requisição; opcionalmente reutiliza o chat aberto via `new_chat:false`) |
 | `stream: true` (NDJSON) | Streaming emitido em NDJSON (replay de chunks do passo final OU `STREAM_UPDATE` incremental se o adaptador suportar) |
 | `options` (temperature, num_predict, stop…) | Traduzidos em instruções injetadas no envelope de system prompt (a Web não expõe esses controles) |
 | `/api/embed` | **Fora de escopo** → `501 Not Implemented` (sem embeddings via Web) |
@@ -99,6 +99,7 @@ O CapoeiraHost é **apenas um gateway de inferência**: recebe comandos Ollama e
 | `CAPOEIRA_MODELS_FILE` | `./models.json` | Arquivo de registry de perfis |
 | `CAPOEIRA_TIMEOUT` | `180` | Timeout (s) por requisição antes de `504` |
 | `CAPOEIRA_QUEUE` | `10` | Máximo de requisições enfileiradas por provedor |
+| `CAPOEIRA_NEW_CHAT` | `true` | Inicia um chat novo na aba Web a cada requisição (padrão). `false` reutiliza o chat aberto; pode ser sobrescrito por requisição via `new_chat` no body de `/api/generate` e `/api/chat` |
 
 > **Mudança vs. doc-base**: na spec original o WebSocket ocupava a 8765. Aqui a **8765 passa a ser da API HTTP** (acesso das demais aplicações) e o **bridge WebSocket vai para a 8766** (só a extensão). Ambos restritos a `127.0.0.1`.
 
@@ -243,6 +244,7 @@ Request (compatível com Ollama):
   "stream": true,                                // opcional
   "format": "json",                              // opcional ("json" injeta instrução de saída estrita)
   "raw": false,                                  // opcional (ignorado)
+  "new_chat": false,                             // opcional (override de CAPOEIRA_NEW_CHAT para esta requisição)
   "images": null,                                // NÃO suportado → 400
   "keep_alive": 0,                               // opcional (aceito, ignorado)
   "options": { "temperature": 0.5, "num_predict": 512 }
@@ -291,6 +293,7 @@ Request:
   ],
   "stream": true,
   "format": null,
+  "new_chat": false,                             // opcional (override de CAPOEIRA_NEW_CHAT para esta requisição)
   "options": { "temperature": 0.7 }
 }
 ```
@@ -575,7 +578,7 @@ O gateway transforma a requisição Ollama no prompt da Web:
    [OPTIONS] temperature=0.7; num_predict=512; stop=STOP
    [MODE] Responda APENAS com JSON válido (sem explicações).
    ```
-2. **Transcript de conversa** (para `/api/chat`): as mensagens são serializadas em turnos numerados dentro do `prompt`, precedidas do system. Cada requisição inicia **novo chat na Web** (`newChat: true`) e reproduz todo o histórico — atomicidade e idempotência por requisição.
+2. **Transcript de conversa** (para `/api/chat`): as mensagens são serializadas em turnos numerados dentro do `prompt`, precedidas do system. Por padrão, cada requisição inicia **novo chat na Web** (`newChat: true`) e reproduz todo o histórico — atomicidade e idempotência por requisição. Quando `newChat: false` (via `CAPOEIRA_NEW_CHAT` ou `new_chat` no request), a extensão **não** clica em "Nova conversa": o prompt é injetado no chat aberto e a resposta é a última do bloco.
 3. **Templates**: se o perfil define `template`, ele é aplicado sobre `system + prompt` (estilo Modelfile/Ollama).
 
 ---
@@ -600,7 +603,7 @@ Todos os erros HTTP retornam corpo `{"error": "<mensagem>"}`.
 
 - **RNF-01 (Segurança Local):** bind padrão `127.0.0.1`; WebSocket valida `Origin` por allowlist (sem origem, `chrome-extension://`, páginas dos provedores, origens locais — demais → `403`) e responde headers de Private Network Access; CORS restrito a `http://localhost:*` e `http://127.0.0.1:*` na API HTTP.
 - **RNF-02 (Resiliência):** reconexão da extensão com exponential backoff sem travar a UI; estado de "offline" propagado como `503`.
-- **RNF-03 (Atomicidade):** cada requisição HTTP mapeia 1:1 para um ciclo `SEND_PROMPT → RESPONSE` com `id` correlacionado; falha de requisição nunca afeta requisições subsequentes (fila FIFO + cancelamento por timeout).
+- **RNF-03 (Atomicidade):** cada requisição HTTP mapeia 1:1 para um ciclo `SEND_PROMPT → RESPONSE` com `id` correlacionado; falha de requisição nunca afeta requisições subsequentes (fila FIFO + cancelamento por timeout). Por padrão cada requisição inicia um **novo chat na Web** (`newChat: true`); ao optar por reutilizar o chat (`CAPOEIRA_NEW_CHAT=false` ou `new_chat:false` por requisição), a conversa Web acumula contexto real, mas falhas deixam resíduo nessa conversa.
 - **RNF-04 (Streaming):** `stream:true` SEMPRE responde em NDJSON. Se o adaptador não suportar incremento, o gateway transmite a `rawResponse` em chunks (por frases) após a geração concluir — nunca sai da spec NDJSON do Ollama.
 - **RNF-05 (Latência):** `executionTimeMs` da resposta vira `total_duration`/`eval_duration`; `eval_count` = caracteres da resposta (estimativa honesta para clientes que exibem métricas).
 - **RNF-06 (Compatibilidade):** sem suporte a embeddings/tools (retornam erro explícito), para que clientes tenham feedback claro em vez de falha silenciosa.

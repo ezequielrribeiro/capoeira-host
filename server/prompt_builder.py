@@ -55,11 +55,12 @@ def build_prompt_payload(
     json_mode: bool,
     options: dict[str, Any] | None,
     conversation: list[dict[str, Any]] | None = None,
+    new_chat: bool = True,
 ) -> dict[str, Any]:
     return {
         "provider": profile.provider,
         "model": profile.name,
-        "newChat": True,
+        "newChat": new_chat,
         "systemPrompt": system,
         "prompt": prompt,
         "conversation": conversation or [],
