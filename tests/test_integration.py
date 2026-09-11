@@ -442,3 +442,151 @@ def test_generate_new_chat_false_via_request_override(app):
             assert ctx["received"][0]["payload"]["newChat"] is False
     finally:
         thread.join(timeout=10)
+
+
+# --------------------------- tool calling simulado ---------------------------
+
+
+TOOLS_SAMPLE = [
+    {
+        "type": "function",
+        "function": {
+            "name": "shopping",
+            "description": "Consulta/prepara uma compra.",
+            "parameters": {
+                "type": "object",
+                "properties": {"item": {"type": "string"}, "quantidade": {"type": "integer"}},
+                "required": ["item"],
+            },
+        },
+    }
+]
+
+
+def test_tool_calling_returns_tool_calls(app):
+    """Com 'tools' presente, se a Web devolver o JSON de contrato, o host
+    converte em message.tool_calls (formato Ollama) com content vazio."""
+    tool_json = '{"name": "shopping", "arguments": {"item": "leite", "quantidade": 2}}'
+    thread, ctx = start_fake_bridge("gemini", tool_json)
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {
+                    "model": "gemini-pro",
+                    "tools": TOOLS_SAMPLE,
+                    "messages": [{"role": "user", "content": "Preciso comprar leite."}],
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["message"]["content"] == ""
+            calls = data["message"]["tool_calls"]
+            assert calls and calls[0]["function"]["name"] == "shopping"
+            assert calls[0]["function"]["arguments"] == {"item": "leite", "quantidade": 2}
+            assert ctx["received"], "bridge não recebeu SEND_PROMPT"
+            prompt = ctx["received"][0]["payload"]["prompt"]
+            assert "[AVAILABLE TOOLS]" in prompt
+            assert "[MODE TOOL_CALLING]" in prompt
+    finally:
+        thread.join(timeout=10)
+
+
+def test_tool_calling_falls_back_to_text(app):
+    """Se a Web responder texto (não JSON de contrato), faz fallback em content."""
+    thread, ctx = start_fake_bridge("gemini", "Vou verificar para você.")
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {
+                    "model": "gemini-pro",
+                    "tools": TOOLS_SAMPLE,
+                    "messages": [{"role": "user", "content": "Compre leite."}],
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["message"]["content"] == "Vou verificar para você."
+            assert not data.get("message", {}).get("tool_calls")
+    finally:
+        thread.join(timeout=10)
+
+
+def test_tool_result_roundtrip_accepted(app):
+    """Assistant com tool_calls + role 'tool' são aceitos quando 'tools' presente
+    e o resultado fica no transcript (TOOL_RESULT)."""
+    thread, ctx = start_fake_bridge("gemini", '{"text": "Você tem 2 leites."}')
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {
+                    "model": "gemini-pro",
+                    "tools": TOOLS_SAMPLE,
+                    "messages": [
+                        {"role": "user", "content": "Preciso de leite."},
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {"function": {"name": "shopping", "arguments": {"item": "leite"}}}
+                            ],
+                        },
+                        {"role": "tool", "content": "Leite comprado", "tool_call_id": "call-1"},
+                    ],
+                },
+            )
+            assert resp.status_code == 200
+            assert resp.json()["message"]["content"] == "Você tem 2 leites."
+            assert ctx["received"]
+            prompt = ctx["received"][0]["payload"]["prompt"]
+            assert "[TOOL_RESULT]" in prompt
+            assert "[assistant chamou ferramenta] name=shopping" in prompt
+    finally:
+        thread.join(timeout=10)
+
+
+def test_tool_call_and_role_tool_rejected_without_tools(app):
+    """Sem 'tools' no request, tool_calls / role 'tool' continuam rejeitados (400)."""
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/chat",
+            json={
+                "model": "gemini-pro",
+                "messages": [
+                    {"role": "tool", "content": "ok", "tool_call_id": "call-1"},
+                ],
+            },
+        )
+        assert resp.status_code == 400
+        assert "tools" in resp.json()["error"]
+
+
+def test_tool_calling_streaming_emits_calls_on_final_chunk(app):
+    """Em streaming com tools, os tool_calls aparecem apenas no chunk final (done)."""
+    tool_json = '{"name": "shopping", "arguments": {"item": "leite"}}'
+    thread, ctx = start_fake_bridge("gemini", tool_json)
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {
+                    "model": "gemini-pro",
+                    "stream": True,
+                    "tools": TOOLS_SAMPLE,
+                    "messages": [{"role": "user", "content": "Compre leite."}],
+                },
+            )
+            assert resp.status_code == 200
+            lines = [json.loads(line) for line in resp.text.strip().splitlines()]
+            assert lines[-1]["done"] is True
+            msg = lines[-1]["message"]
+            assert msg["content"] == ""
+            assert msg["tool_calls"][0]["function"]["name"] == "shopping"
+    finally:
+        thread.join(timeout=10)

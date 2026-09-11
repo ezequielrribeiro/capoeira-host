@@ -321,7 +321,17 @@ Resposta **stream** (NDJSON):
 {"model":"gemini-pro","created_at":"...","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","total_duration":5800000000,"eval_count":96}
 ```
 
-> **Mensagens não suportadas**: `role: "tool"` ou `tool_calls` → `400 Bad Request` (`{"error":"tool calls não são suportadas na interface Web"}`).
+> **Tool calling simulado**: quando o request traz `tools`, o CapoeiraHost injeta as
+> definições no envelope de system prompt e instrui o modelo Web a responder com um
+> JSON de contrato — `{"name": "...", "arguments": {...}}` (chamar ferramenta) ou
+> `{"text": "..."}` (responder direto). O gateway converte o contrato em
+> `message.tool_calls` no formato Ollama (`[{"function": {"name", "arguments"}}]`).
+> Se a resposta não for um tool call válido, faz **fallback** devolvendo o texto em
+> `message.content`. Nesse modo também são aceitos assistant com `tool_calls` e
+> mensagens `role: "tool"` (`tool_call_id` + `content`) para continuar o ciclo.
+>
+> **Sem `tools` no request**: `role: "tool"` ou `tool_calls` → `400 Bad Request`
+> (`{"error":"tool calls / role 'tool' exigem a lista 'tools' no request (tool calling simulado)"}`).
 
 ### 5.6. `POST /api/show`
 
@@ -595,7 +605,7 @@ Todos os erros HTTP retornam corpo `{"error": "<mensagem>"}`.
 | Fila cheia para o provider | `503` | `{"error":"bridge queue full (10)"}` |
 | Timeout de geração na Web | `504` | `{"error":"bridge timeout after 180s"}` |
 | Extensão reportou `ERROR` | `502` | `{"error":"<message vindo da extensão>"}` |
-| `images`/`tools`/`tool_calls`/embeddings | `400`/`501` | ver seções 5.4/5.5/5.9 |
+| `images` / `tool`/`tool_calls` sem a lista `tools` / embeddings | `400`/`501` | ver seções 5.4/5.5/5.9 |
 
 ---
 
@@ -606,7 +616,7 @@ Todos os erros HTTP retornam corpo `{"error": "<mensagem>"}`.
 - **RNF-03 (Atomicidade):** cada requisição HTTP mapeia 1:1 para um ciclo `SEND_PROMPT → RESPONSE` com `id` correlacionado; falha de requisição nunca afeta requisições subsequentes (fila FIFO + cancelamento por timeout). Por padrão cada requisição inicia um **novo chat na Web** (`newChat: true`); ao optar por reutilizar o chat (`CAPOEIRA_NEW_CHAT=false` ou `new_chat:false` por requisição), a conversa Web acumula contexto real, mas falhas deixam resíduo nessa conversa.
 - **RNF-04 (Streaming):** `stream:true` SEMPRE responde em NDJSON. Se o adaptador não suportar incremento, o gateway transmite a `rawResponse` em chunks (por frases) após a geração concluir — nunca sai da spec NDJSON do Ollama.
 - **RNF-05 (Latência):** `executionTimeMs` da resposta vira `total_duration`/`eval_duration`; `eval_count` = caracteres da resposta (estimativa honesta para clientes que exibem métricas).
-- **RNF-06 (Compatibilidade):** sem suporte a embeddings/tools (retornam erro explícito), para que clientes tenham feedback claro em vez de falha silenciosa.
+- **RNF-06 (Compatibilidade):** embeddings fora de escopo (erro explícito `501`); **tool calling simulado** em `/api/chat` (ativado quando o request traz `tools`) com fallback para texto quando o modelo Web não produz um tool call válido.
 
 ---
 
@@ -687,4 +697,4 @@ Clientes Ollama existentes (Open WebUI, `ollama` SDKs, langchain `OllamaLLM`) fu
 - CLI do usuário (agente de terminal) — **dispensado**.
 - Redução de contexto (Tree-Sitter/AST, skeleton, grafos de dependência) — **dispensado**.
 - Aplicador de diffs / escrita em arquivos locais — **dispensado**.
-- Embeddings, tools/function-calling, upload de imagens, pull/push de modelos.
+- Embeddings, upload de imagens, pull/push de modelos. *(Tools/function-calling são suportados de forma **simulada** via prompt — ver §5.5.)*

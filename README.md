@@ -202,19 +202,63 @@ Base URL: `http://127.0.0.1:8765`
 > valor por requisição tem precedência). Campo exclusivo do CapoeiraHost — clientes
 > Ollama ignoram campos extras.
 
+### Tool calling simulado
+
+A UI Web dos provedores **não executa function calling nativo**. Para que agentes
+possam chamar ferramentas (automações locais, etc.), o CapoeiraHost ativa um **tool
+calling simulado**: quando `/api/chat` recebe a lista `tools`, as definições são
+injetadas no envelope de system prompt e o modelo é orientado a responder com um
+JSON de contrato. O gateway então converte a resposta em `message.tool_calls` no
+formato Ollama-compatível.
+
+- **Ativação global, otimista:** ocorre somente quando a requisição traz `tools`.
+- **Contrato de saída:** o modelo responde `{"name": "...", "arguments": {...}}` para
+  chamar uma ferramenta, ou `{"text": "..."}` quando não precisa.
+- **Fallback:** se a resposta não for um tool call válido, o host devolve o texto
+  como `message.content` (nunca quebra a conversa).
+
+```python
+import requests
+
+r = requests.post(
+    "http://127.0.0.1:8765/api/chat",
+    json={
+        "model": "gemini-pro",
+        "stream": False,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "shopping",
+                    "description": "Consulta uma compra.",
+                    "parameters": {"type": "object", "properties": {"item": {"type": "string"}}, "required": ["item"]},
+                },
+            }
+        ],
+        "messages": [{"role": "user", "content": "Preciso comprar leite."}],
+    },
+)
+resp = r.json()["message"]
+print(resp.get("tool_calls", resp.get("content")))
+```
+
+Depois que o agente executa a ferramenta, ele continua a conversa enviando de volta o
+assistant com `tool_calls` e um `role: "tool"` com o resultado (`tool_call_id` +
+`content`). Se um `role: "tool"` chegar **sem** a lista `tools`, o host retorna `400`.
+
 ### Não aplicáveis (modelo não é hospedado)
 
 | Endpoint | Status | Motivo |
 |---|---|---|
 | `/api/pull`, `/api/push`, `/api/blobs/*` | `501` | Modelos vêm da Web, não são baixados |
 | `/api/embed`, `/api/embeddings` | `501` | Embeddings fora de escopo |
-| `images`, `tools`/`tool_calls` no payload | `400` | Não suportados via interface Web |
+| `images` no payload | `400` | Não suportados via interface Web |
 
 ### Erros (formato Ollama: `{"error": "<mensagem>"}`)
 
 | Código | Situação típica |
 |---|---|
-| `400` | Corpo inválido, imagens ou tool calls |
+| `400` | Corpo inválido, imagens, ou tool calling sem a lista `tools` no request |
 | `404` | Modelo não registrado |
 | `502` | Falha reportada pela extensão durante a geração |
 | `503` | Provider sem bridge conectado / fila cheia |

@@ -38,13 +38,14 @@ def _require_online(bridge, provider: str) -> None:
 
 
 def _validate_chat(req: ChatRequest) -> None:
-    if req.tools:
-        raise BadRequest("tool calling não é suportado via interface Web")
+    tool_mode = bool(req.tools)
     for msg in req.messages:
         if msg.images:
             raise BadRequest("imagens via API não são suportadas; use a UI Web")
-        if msg.tool_calls or msg.role == "tool":
-            raise BadRequest("tool calls / role 'tool' não são suportados via interface Web")
+        if not tool_mode and (msg.tool_calls or msg.role == "tool"):
+            raise BadRequest(
+                "tool calls / role 'tool' exigem a lista 'tools' no request (tool calling simulado)"
+            )
 
 
 def _num(value: str):
@@ -162,11 +163,11 @@ def build_router() -> APIRouter:
 
             return StreamingResponse(ndjson(), media_type="application/x-ndjson")
 
-        content, metrics = await gateway.chat(profile, req, deadline, new_chat=new_chat)
+        message, metrics = await gateway.chat(profile, req, deadline, new_chat=new_chat)
         return ChatResponse(
             model=profile.name,
             created_at=_now_dt(),
-            message=ChatMessageOut(content=content),
+            message=ChatMessageOut(**message),
             **metrics,
         )
 

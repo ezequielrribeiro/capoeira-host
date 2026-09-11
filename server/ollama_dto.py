@@ -140,6 +140,7 @@ class ChatMessageOut(BaseModel):
     role: str = "assistant"
     content: str
     images: list[str] | None = None
+    tool_calls: list[Any] | None = None
 
 
 class ChatResponse(BaseModel):
