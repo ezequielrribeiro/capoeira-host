@@ -242,7 +242,7 @@ Request (compatível com Ollama):
   "system": "Responda em português.",           // opcional (overrides do perfil)
   "template": null,                              // opcional
   "stream": true,                                // opcional
-  "format": "json",                              // opcional ("json" injeta instrução de saída estrita)
+  "format": "json",                              // opcional ("json" ativa o contrato [JSON_START]...[JSON_END] + extração)
   "raw": false,                                  // opcional (ignorado)
   "new_chat": false,                             // opcional (override de CAPOEIRA_NEW_CHAT para esta requisição)
   "images": null,                                // NÃO suportado → 400
@@ -321,17 +321,17 @@ Resposta **stream** (NDJSON):
 {"model":"gemini-pro","created_at":"...","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","total_duration":5800000000,"eval_count":96}
 ```
 
-> **Tool calling simulado**: quando o request traz `tools`, o CapoeiraHost injeta as
-> definições no envelope de system prompt e instrui o modelo Web a emitir **uma linha de
-> texto puro por chamada** no formato `[TOOL_CALL] nome {"args": ...}` — sem blocos de
-> código/markdown. O gateway faz **scan por regex** em todo o texto (tolerante a prosa ao
-> redor), converte cada linha em `message.tool_calls` no formato Ollama
-> (`[{"function": {"name", "arguments"}}]`), e múltiplas linhas viram chamadas **paralelas**.
-> Se não houver linha válida, faz **fallback** devolvendo o texto (com as linhas `[TOOL_CALL]`
-> removidas) em `message.content`. Nesse modo também são aceitos assistant com
-> `tool_calls` e mensagens `role: "tool"` (`tool_call_id` + `content`) para continuar o ciclo.
->
-> **Contrato de tool call** (enviado no system envelope):
+> **Tool calling simulado**: quando o request traz `tools`, o CapoeiraHost lista as
+> definições no envelope de system prompt como **linhas únicas** (`[TOOLS]` header + uma
+> linha `[TOOL] {"name":..., "parameters":...}` por ferramenta — sem blob JSON) e instrui
+> o modelo Web a emitir **uma linha de texto puro por chamada** no formato
+> `[TOOL_CALL] nome {"args": ...}` — sem blocos de código/markdown. O gateway faz **scan
+> por regex** em todo o texto (tolerante a prosa ao redor), converte cada linha em
+> `message.tool_calls` no formato Ollama (`[{"function": {"name", "arguments"}}]`), e
+> múltiplas linhas viram chamadas **paralelas**. Se não houver linha válida, faz
+> **fallback** devolvendo o texto (com as linhas `[TOOL_CALL]` removidas) em
+> `message.content`. Nesse modo também são aceitos assistant com `tool_calls` e mensagens
+> `role: "tool"` (`tool_call_id` + `content`) para continuar o ciclo.
 >
 > **Sem `tools` no request**: `role: "tool"` ou `tool_calls` → `400 Bad Request`
 > (`{"error":"tool calls / role 'tool' exigem a lista 'tools' no request (tool calling simulado)"}`).
@@ -341,6 +341,12 @@ Exemplo de resposta do modelo Web com tool call (1 linha por chamada; prosa opci
 ```text
 [TOOL_CALL] shopping {"item": "leite", "quantidade": 2}
 ```
+
+> **Saída `format: "json"`**: em `/api/generate` e `/api/chat` com `format: "json"`
+> (sem `tools`), o envelope injeta `[MODE_JSON]` e o modelo é orientado a devolver o JSON
+> entre `[JSON_START]` e `[JSON_END]`. O gateway **extrai** o bloco com parsing tolerante a
+> prosa/code fences (validado por `json.loads`); sem marcadores válidos, faz fallback
+> devolvendo o texto cru (com as linhas de marcador removidas).
 
 ### 5.6. `POST /api/show`
 
@@ -595,9 +601,25 @@ O gateway transforma a requisição Ollama no prompt da Web:
    [SYSTEM]
    <system_prompt do perfil>
    [OPTIONS] temperature=0.7; num_predict=512; stop=STOP
-   [MODE] Responda APENAS com JSON válido (sem explicações).
+   [TOOLS] ferramentas disponíveis (uma por linha, respeitando o schema de 'parameters'):
+   [TOOL] {"name": "shopping", "description": "...", "parameters": {...}}
+   [MODE_JSON] Responda com o JSON EXATAMENTE entre as linhas de marcador abaixo, sem markdown e sem texto fora delas:
+   [JSON_START]
+   {"chave": "valor"}
+   [JSON_END]
    ```
-2. **Transcript de conversa** (para `/api/chat`): as mensagens são serializadas em turnos numerados dentro do `prompt`, precedidas do system. Por padrão, cada requisição inicia **novo chat na Web** (`newChat: true`) e reproduz todo o histórico — atomicidade e idempotência por requisição. Quando `newChat: false` (via `CAPOEIRA_NEW_CHAT` ou `new_chat` no request), a extensão **não** clica em "Nova conversa": o prompt é injetado no chat aberto e a resposta é a última do bloco.
+   > Todos os marcadores de comunicação seguem o contrato de **linha única** `[TAG] valor`.
+   > `[TOOLS]`/`[TOOL]` listam as ferramentas; `[MODE_JSON]`+`[JSON_START]`/`[JSON_END]`
+   > regem a saída `format:"json"` (o gateway extrai o JSON com parsing tolerante a prosa);
+   > `[MODE TOOL_CALLING]`+`[TOOL_CALL]` regem o tool calling simulado. `[MODE_JSON]` só é
+   > injetado quando não há `tools`.
+2. **Transcript de conversa** (para `/api/chat`): as mensagens são serializadas em turnos
+   com tags de linha única (`[SYSTEM]`, `[USER]`, `[ASSISTANT]`, `[TOOL_CALL] nome {args}`,
+   `[TOOL_RESULT] (id) conteúdo`) dentro do `prompt`, precedidas do system. Por padrão, cada
+   requisição inicia **novo chat na Web** (`newChat: true`) e reproduz todo o histórico —
+   atomicidade e idempotência por requisição. Quando `newChat: false` (via `CAPOEIRA_NEW_CHAT` ou
+   `new_chat` no request), a extensão **não** clica em "Nova conversa": o prompt é injetado no
+   chat aberto e a resposta é a última do bloco.
 3. **Templates**: se o perfil define `template`, ele é aplicado sobre `system + prompt` (estilo Modelfile/Ollama).
 
 ---

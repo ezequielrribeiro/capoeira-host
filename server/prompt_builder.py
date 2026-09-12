@@ -20,6 +20,14 @@ TOOL_CALL_CONTRACT = (
     'ferramenta, responda normalmente com texto.'
 )
 
+JSON_OUTPUT_CONTRACT = (
+    '[MODE_JSON] Responda com o JSON EXATAMENTE entre as linhas de marcador abaixo, '
+    'sem markdown e sem texto fora delas:\n'
+    '[JSON_START]\n'
+    '{"chave": "valor"}\n'
+    '[JSON_END]'
+)
+
 
 def _normalize_tools(tools: list[Any]) -> list[Any]:
     """Normaliza tools no formato Ollama (lista com chave 'function') e OpenAI
@@ -37,11 +45,9 @@ def build_tools_instruction(tools: list[Any] | None) -> str:
     if not tools:
         return ""
     bodies = _normalize_tools(tools)
-    return (
-        "[AVAILABLE TOOLS] (apenas nomes aceitos em \"name\"; "
-        "\"arguments\" deve respeitar o schema de 'parameters' de cada ferramenta)\n"
-        + json.dumps({"tools": bodies}, ensure_ascii=False)
-    )
+    lines = ["[TOOLS] ferramentas disponíveis (uma por linha, respeitando o schema de 'parameters'):"]
+    lines.extend("[TOOL] " + json.dumps(body, ensure_ascii=False) for body in bodies)
+    return "\n".join(lines)
 
 
 def build_options_instruction(options: dict[str, Any] | None) -> str:
@@ -66,8 +72,8 @@ def build_system_envelope(
     tool_instr = build_tools_instruction(tools)
     if tool_instr:
         parts.append(tool_instr)
-    if json_mode:
-        parts.append("[MODE] Responda APENAS com JSON válido, sem explicações ou texto fora do bloco JSON.")
+    if json_mode and not tools:
+        parts.append(JSON_OUTPUT_CONTRACT)
     if tools:
         parts.append(TOOL_CALL_CONTRACT)
     return "\n".join(part for part in parts if part)
@@ -75,25 +81,23 @@ def build_system_envelope(
 
 def build_chat_transcript(messages: list[Any]) -> str:
     lines: list[str] = []
-    for idx, msg in enumerate(messages):
+    for msg in messages:
         if msg.role == "system":
-            label = "SYSTEM"
-        elif msg.role == "tool":
-            label = "TOOL_RESULT"
-        else:
-            label = msg.role.upper()
-        lines.append(f"[{idx}] [{label}]")
-        if msg.role == "tool" and msg.tool_call_id:
-            lines.append(f"(resposta da chamada de ferramenta {msg.tool_call_id})")
+            lines.append(f"[SYSTEM] {msg.content}".strip())
+            continue
+        if msg.role == "tool":
+            prefix = f"[TOOL_RESULT] ({msg.tool_call_id}) " if msg.tool_call_id else "[TOOL_RESULT] "
+            lines.append(f"{prefix}{msg.content}".strip())
+            continue
         if msg.role == "assistant" and msg.tool_calls:
             for call in msg.tool_calls:
                 fn = (call or {}).get("function") or {}
                 lines.append(
-                    f"[assistant chamou ferramenta] name={fn.get('name')} "
-                    f"arguments={json.dumps(fn.get('arguments'), ensure_ascii=False)}"
+                    f"[TOOL_CALL] {fn.get('name')} "
+                    f"{json.dumps(fn.get('arguments'), ensure_ascii=False)}"
                 )
-        if msg.content:
-            lines.append(msg.content or "")
+        label = msg.role.upper()
+        lines.append(f"[{label}] {msg.content}".strip())
     return "\n".join(line for line in lines if line)
 
 

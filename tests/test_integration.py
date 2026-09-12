@@ -229,7 +229,7 @@ def test_generate_via_fake_extension(app):
             assert ctx["received"], "bridge não recebeu SEND_PROMPT"
             payload = ctx["received"][0]["payload"]
             assert "[SYSTEM]" in payload["systemPrompt"]
-            assert "[0] [USER]" in payload["prompt"]
+            assert "[USER]" in payload["prompt"]
             assert payload["newChat"] is True
     finally:
         thread.join(timeout=10)
@@ -494,7 +494,8 @@ def test_tool_calling_returns_tool_calls(app):
             assert calls[0]["function"]["arguments"] == {"item": "leite", "quantidade": 2}
             assert ctx["received"], "bridge não recebeu SEND_PROMPT"
             prompt = ctx["received"][0]["payload"]["prompt"]
-            assert "[AVAILABLE TOOLS]" in prompt
+            assert "[TOOLS]" in prompt
+            assert "[TOOL] " in prompt
             assert "[MODE TOOL_CALLING]" in prompt
     finally:
         thread.join(timeout=10)
@@ -631,7 +632,7 @@ def test_tool_result_roundtrip_accepted(app):
             assert ctx["received"]
             prompt = ctx["received"][0]["payload"]["prompt"]
             assert "[TOOL_RESULT]" in prompt
-            assert "[assistant chamou ferramenta] name=shopping" in prompt
+            assert "[TOOL_CALL] shopping" in prompt
     finally:
         thread.join(timeout=10)
 
@@ -674,5 +675,100 @@ def test_tool_calling_streaming_emits_calls_on_final_chunk(app):
             msg = lines[-1]["message"]
             assert msg["content"] == ""
             assert msg["tool_calls"][0]["function"]["name"] == "shopping"
+    finally:
+        thread.join(timeout=10)
+
+
+# --------------------------- format json (saída via marcadores) ---------------------------
+
+
+def json_output_response():
+    return (
+        "Aqui está o resultado:\n"
+        "[JSON_START]\n"
+        '{"capoeira": "arte", "origem": "Brasil"}\n'
+        "[JSON_END]"
+    )
+
+
+def test_generate_format_json_extracts_output(app):
+    """Com format:'json', o JSON entre [JSON_START]/[JSON_END] é extraído mesmo com
+    prosa ao redor (mesma tolerância do tool calling)."""
+    thread, ctx = start_fake_bridge("gemini", json_output_response())
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/generate",
+                {"model": "gemini-pro", "prompt": "o que é capoeira?", "format": "json"},
+            )
+            assert resp.status_code == 200
+            expected = '{"capoeira": "arte", "origem": "Brasil"}'
+            assert resp.json()["response"] == expected
+            assert ctx["received"]
+            prompt = ctx["received"][0]["payload"]["systemPrompt"]
+            assert "[MODE_JSON]" in prompt
+            assert "[JSON_START]" in prompt
+            assert "[JSON_END]" in prompt
+    finally:
+        thread.join(timeout=10)
+
+
+def test_generate_format_json_fallback_without_markers(app):
+    """Sem marcadores [JSON_START]/[JSON_END], o texto cru é devolvido (fallback)."""
+    thread, ctx = start_fake_bridge("gemini", "Resposta surreal.")
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/generate",
+                {"model": "gemini-pro", "prompt": "oi", "format": "json"},
+            )
+            assert resp.status_code == 200
+            assert resp.json()["response"] == "Resposta surreal."
+    finally:
+        thread.join(timeout=10)
+
+
+def test_chat_format_json_extracts_output(app):
+    """Em /api/chat com format:'json', o content é o JSON extraído dos marcadores."""
+    thread, ctx = start_fake_bridge("gemini", json_output_response())
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {
+                    "model": "gemini-pro",
+                    "format": "json",
+                    "messages": [{"role": "user", "content": "o que é capoeira?"}],
+                },
+            )
+            assert resp.status_code == 200
+            assert resp.json()["message"]["content"] == '{"capoeira": "arte", "origem": "Brasil"}'
+            assert not resp.json()["message"].get("tool_calls")
+    finally:
+        thread.join(timeout=10)
+
+
+def test_chat_format_json_without_tools_has_no_tool_contract(app):
+    """format:'json' sem tools não injeta o contrato de tool calling."""
+    thread, ctx = start_fake_bridge("gemini", "ok")
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {
+                    "model": "gemini-pro",
+                    "format": "json",
+                    "messages": [{"role": "user", "content": "oi"}],
+                },
+            )
+            assert resp.status_code == 200
+            system = ctx["received"][0]["payload"]["systemPrompt"]
+            assert "[MODE_JSON]" in system
+            assert "[MODE TOOL_CALLING]" not in system
+            assert "[TOOLS]" not in system
     finally:
         thread.join(timeout=10)

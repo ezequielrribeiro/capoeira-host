@@ -20,6 +20,8 @@ def _now() -> str:
 
 _TOOL_CALL_LINE = re.compile(r"(?m)^\s*\[TOOL_CALL\]\s+([^\s}{]+)\s*(\{.*\})?\s*$")
 _TOOL_CALL_ANY_LINE = re.compile(r"(?m)^\s*\[TOOL_CALL\].*$")
+_JSON_OUTPUT_BLOCK = re.compile(r"\[JSON_START\]\s*(.*?)\s*\[JSON_END\]", re.DOTALL)
+_JSON_OUTPUT_MARKER_LINE = re.compile(r"(?m)^\s*\[JSON_(?:START|END)\]\s*$")
 
 
 def _parse_tool_call_lines(raw: str) -> list[dict] | None:
@@ -47,6 +49,26 @@ def _parse_tool_call_lines(raw: str) -> list[dict] | None:
 def _strip_tool_call_lines(raw: str) -> str:
     """Remove as linhas [TOOL_CALL] do texto (válidas ou não), deixando só a prosa."""
     return _TOOL_CALL_ANY_LINE.sub("", raw or "").strip()
+
+
+def _extract_json_output(raw: str) -> str | None:
+    """Extrai o JSON do contrato [JSON_START]...[JSON_END] telegrafado pelo modelo
+    Web (tolerante a prosa e a code fences ao redor). Valida com json.loads;
+    devolve o texto JSON ou None se não houver bloco válido."""
+    match = _JSON_OUTPUT_BLOCK.search(raw or "")
+    if not match:
+        return None
+    text = match.group(1).strip().strip("`").strip()
+    try:
+        json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return text
+
+
+def _strip_json_markers(raw: str) -> str:
+    """Remove as linhas de marcador [JSON_START]/[JSON_END], deixando só o conteúdo."""
+    return _JSON_OUTPUT_MARKER_LINE.sub("", raw or "").strip()
 
 
 def _metrics(execution_ms: float, text: str) -> dict:
@@ -111,6 +133,10 @@ class Gateway:
             else:
                 exec_ms = float((done_payload or {}).get("executionTimeMs") or 0)
                 full = (done_payload or {}).get("rawResponse") or ""
+                if req.format == "json":
+                    extracted = _extract_json_output(full)
+                    full = extracted if extracted is not None else _strip_json_markers(full)
+                    transmitted = ""
                 delta = full[len(transmitted):]
                 if delta:
                     transmitted += delta
@@ -180,6 +206,10 @@ class Gateway:
                         return
                     full = _strip_tool_call_lines(full)
                     transmitted = full
+                elif req.format == "json":
+                    extracted = _extract_json_output(full)
+                    full = extracted if extracted is not None else _strip_json_markers(full)
+                    transmitted = ""
                 delta = full[len(transmitted):]
                 if delta and not tool_mode:
                     transmitted += delta

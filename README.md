@@ -227,15 +227,20 @@ Exemplos de payload por requisição (`new_chat: false` reutiliza o chat aberto;
 A UI Web dos provedores **não executa function calling nativo**. Para que agentes
 possam chamar ferramentas (automações locais, etc.), o CapoeiraHost ativa um **tool
 calling simulado**: quando `/api/chat` recebe a lista `tools`, as definições são
-injetadas no envelope de system prompt e o modelo é orientado a responder com um
-JSON de contrato. O gateway então converte a resposta em `message.tool_calls` no
-formato Ollama-compatível.
+listadas no envelope de system prompt como linhas únicas (`[TOOLS]` + uma linha
+`[TOOL] {"name": ..., "parameters": ...}` por ferramenta) e o modelo é orientado a
+responder com **uma linha de texto puro** no contrato `[TOOL_CALL] nome {"args": ...}`.
+O gateway então converte cada linha em `message.tool_calls` no formato
+Ollama-compatível.
 
 - **Ativação global, otimista:** ocorre somente quando a requisição traz `tools`.
-- **Contrato de saída:** o modelo responde `{"name": "...", "arguments": {...}}` para
-  chamar uma ferramenta, ou `{"text": "..."}` quando não precisa.
-- **Fallback:** se a resposta não for um tool call válido, o host devolve o texto
-  como `message.content` (nunca quebra a conversa).
+- **Contrato de saída:** o modelo emite uma linha por chamada:
+  `[TOOL_CALL] shopping {"item": "leite", "quantidade": 2}` — pode haver texto antes/depois,
+  e múltiplas linhas viram chamadas paralelas.
+- **Fallback:** se a resposta não for uma tool call válida, o host devolve o texto
+  (com as linhas `[TOOL_CALL]` removidas) como `message.content` (nunca quebra a conversa).
+- **Saída `format: "json"`** (sem `tools`): o modelo devolve o JSON entre `[JSON_START]`
+  e `[JSON_END]`; o gateway extrai o bloco tolerando prosa ao redor.
 
 ```python
 import requests
