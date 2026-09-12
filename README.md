@@ -101,6 +101,9 @@ python smoke_test.py --endpoint chat --prompt "Quem foi Besouro Mangangá?" --st
 
 # Outro modelo / endpoint personalizado
 python smoke_test.py --model claude-sonnet --stream
+
+# Reutilizar o mesmo chat na aba Web (não cria um chat novo)
+python smoke_test.py --endpoint chat --prompt "Continua neste chat?" --new-chat false
 ```
 
 O script imprime a **solicitação** enviada e o **retorno** do servidor. Se o
@@ -109,10 +112,16 @@ motivo (`503 no bridge available`) e a dica de correção. Para usar outra hora,
 porta ou arquivo de config, consulte a tabela em [Configuração](#configuração-env),
 ou passe `--base-url http://127.0.0.1:9000` por exemplo.
 
+O flag `--new-chat {true,false}` envia `new_chat` no payload, sobrescrevendo
+`CAPOEIRA_NEW_CHAT` **por requisição** (ausente = usa o default do servidor). Com
+`--new-chat false` a extensão injeta o prompt no chat já aberto, em vez de criar
+nova conversa.
+
 Alternativa em bash (Linux/macOS):
 
 ```bash
 curl http://127.0.0.1:8765/api/chat -d '{"model":"gemini-pro","stream":true,"messages":[{"role":"user","content":"Quem foi Besouro Mangangá?"}]}'
+curl http://127.0.0.1:8765/api/chat -d '{"model":"gemini-pro","new_chat":false,"stream":true,"messages":[{"role":"user","content":"Continua neste chat?"}]}'
 ```
 
 ## Melhorias com Python
@@ -201,6 +210,17 @@ Base URL: `http://127.0.0.1:8765`
 > `"new_chat": false` no corpo de `/api/generate` ou `/api/chat` (por requisição; o
 > valor por requisição tem precedência). Campo exclusivo do CapoeiraHost — clientes
 > Ollama ignoram campos extras.
+
+Exemplos de payload por requisição (`new_chat: false` reutiliza o chat aberto;
+`new_chat: true` restaura o comportamento de novo chat, mesmo com o env em `false`):
+
+```json
+{ "model": "gemini-pro", "new_chat": false, "messages": [{ "role": "user", "content": "Continua neste chat?" }] }
+```
+
+```json
+{ "model": "gemini-pro", "prompt": "Oi", "new_chat": false }
+```
 
 ### Tool calling simulado
 
