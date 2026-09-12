@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Smoke test do CapoeiraHost.
 
-Envia uma requisição à API Ollama-compatível e exibe a solicitação e o
-retorno — inclusive streaming NDJSON. Usa apenas a biblioteca padrão, sem
-dependências extras e sem problemas de quoting de shell.
+Envia uma requisição à API textual (form-urlencoded + text/plain) e exibe o
+retorno — inclusive streaming. Usa apenas a biblioteca padrão, sem dependências
+extras e sem problemas de quoting de shell.
 
 Uso:
     python smoke_test.py
@@ -15,10 +15,10 @@ Uso:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 for _stream in (sys.stdout, sys.stderr):
@@ -28,7 +28,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 ERROR_HINTS = {
-    400: "Corpo inválido ou recurso não suportado (imagens / tool calls).",
+    400: "Campos obrigatórios ausentes ou role/tool inválido.",
     404: "Modelo não registrado no registry.",
     501: "Endpoint não aplicável ao CapoeiraHost.",
     502: "Falha reportada pela extensão durante a geração na Web.",
@@ -43,59 +43,43 @@ def default_base_url() -> str:
     return f"http://{host}:{port}"
 
 
-def build_payload(args) -> dict:
+def build_fields(args) -> list[tuple[str, str]]:
+    fields: list[tuple[str, str]] = [("model", args.model)]
     if args.endpoint == "generate":
-        payload = {"model": args.model, "prompt": args.prompt, "stream": args.stream}
+        fields.append(("prompt", args.prompt))
     else:
-        payload = {
-            "model": args.model,
-            "stream": args.stream,
-            "messages": [{"role": "user", "content": args.prompt}],
-        }
+        fields.append(("role", "user"))
+        fields.append(("content", args.prompt))
+    if args.stream:
+        fields.append(("stream", "true"))
     if args.new_chat is not None:
-        payload["new_chat"] = args.new_chat == "true"
-    return payload
+        fields.append(("new_chat", args.new_chat))
+    return fields
 
 
-def print_json(data) -> None:
-    print(json.dumps(data, ensure_ascii=False, indent=2))
-
-
-def build_request(url: str, payload: dict) -> urllib.request.Request:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+def build_request(url: str, fields: list[tuple[str, str]]) -> urllib.request.Request:
+    body = urllib.parse.urlencode(fields).encode("utf-8")
     return urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}
+        url, data=body, headers={"Content-Type": "application/x-www-form-urlencoded"}
     )
 
 
 def handle_http_error(exc: urllib.error.HTTPError) -> None:
     print(f"HTTP {exc.code}", file=sys.stderr)
-    raw = exc.read().decode("utf-8", errors="replace")
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        print(raw, file=sys.stderr)
-        return
-    message = data.get("error") or (data.get("detail") and json.dumps(data["detail"], ensure_ascii=False))
-    if message:
-        print(f"Erro: {message}", file=sys.stderr)
+    raw = exc.read().decode("utf-8", errors="replace").strip()
+    if raw:
+        print(f"Erro: {raw}", file=sys.stderr)
     hint = ERROR_HINTS.get(exc.code)
     if hint:
         print(f"Dica: {hint}", file=sys.stderr)
     sys.exit(1)
 
 
-def extract_text(chunk: dict, endpoint: str) -> str:
-    if endpoint == "chat":
-        return (chunk.get("message") or {}).get("content") or ""
-    return chunk.get("response") or ""
-
-
-def read_non_stream(url: str, payload: dict) -> None:
+def read_non_stream(url: str, fields: list[tuple[str, str]]) -> None:
     try:
-        with urllib.request.urlopen(build_request(url, payload)) as resp:
-            print(f"HTTP {resp.status}")
-            print_json(json.loads(resp.read().decode("utf-8")))
+        with urllib.request.urlopen(build_request(url, fields)) as resp:
+            print(f"HTTP {resp.status} ({resp.headers.get('Content-Type', '')})")
+            print(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         handle_http_error(exc)
     except urllib.error.URLError as exc:
@@ -104,26 +88,15 @@ def read_non_stream(url: str, payload: dict) -> None:
         sys.exit(1)
 
 
-def read_stream(url: str, payload: dict, endpoint: str) -> None:
+def read_stream(url: str, fields: list[tuple[str, str]]) -> None:
     try:
-        with urllib.request.urlopen(build_request(url, payload)) as resp:
-            print(f"HTTP {resp.status} (NDJSON)")
+        with urllib.request.urlopen(build_request(url, fields)) as resp:
+            print(f"HTTP {resp.status} (texto, streaming)")
             for raw in resp:
-                line = raw.decode("utf-8").strip()
-                if not line:
-                    continue
-                try:
-                    chunk = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                text = extract_text(chunk, endpoint)
+                text = raw.decode("utf-8")
                 if text:
                     print(text, end="", flush=True)
-                if chunk.get("done"):
-                    print()
-                    print("---")
-                    print("Resposta completa. Linha final:")
-                    print_json(chunk)
+            print()
     except urllib.error.HTTPError as exc:
         handle_http_error(exc)
     except urllib.error.URLError as exc:
@@ -147,19 +120,20 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    payload = build_payload(args)
+    fields = build_fields(args)
     url = f"{args.base_url}/api/{args.endpoint}"
 
     print("=" * 40)
     print(f"POST {url}")
     print("Solicitação:")
-    print_json(payload)
+    for key, value in fields:
+        print(f"  {key} = {value}")
     print("=" * 40)
 
     if args.stream:
-        read_stream(url, payload, args.endpoint)
+        read_stream(url, fields)
     else:
-        read_non_stream(url, payload)
+        read_non_stream(url, fields)
 
 
 if __name__ == "__main__":

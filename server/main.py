@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import PlainTextResponse
 
 from .bridge import BridgeServer
 from .config import Settings
@@ -48,8 +48,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     @app.exception_handler(OllamaError)
-    async def ollama_error_handler(request, exc: OllamaError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"error": exc.message})
+    async def ollama_error_handler(request, exc: OllamaError) -> PlainTextResponse:
+        return PlainTextResponse(status_code=exc.status_code, content=exc.message)
 
     app.include_router(build_router())
     return app

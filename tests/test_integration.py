@@ -2,6 +2,7 @@ import asyncio
 import json
 import threading
 import time
+import urllib.parse
 import uuid
 
 import pytest
@@ -168,13 +169,21 @@ def start_fake_bridge(provider, response_text, *, streaming=False, partials=None
     return thread, ctx
 
 
-def post_until(client, path, payload, timeout=POLL_TIMEOUT):
+def post_until(client, path, fields, timeout=POLL_TIMEOUT):
     """Repete o POST enquanto o provider ainda não estiver registrado (503),
     garantindo que o HELLO da extensão fake foi processado pelo bridge."""
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
-        last = client.post(path, json=payload)
+        if isinstance(fields, list):
+            body = urllib.parse.urlencode(fields).encode("utf-8")
+            last = client.post(
+                path,
+                content=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+        else:
+            last = client.post(path, data=fields)
         if last.status_code != 503:
             return last
         time.sleep(0.05)
@@ -188,43 +197,45 @@ def test_version_ok(app):
     with TestClient(app) as client:
         resp = client.get("/api/version")
         assert resp.status_code == 200
-        assert resp.json() == {"version": "1.0.0"}
+        assert resp.text == "1.0.0"
+        assert "text/plain" in resp.headers["content-type"]
 
 
 def test_tags_lists_profiles(app):
     with TestClient(app) as client:
         resp = client.get("/api/tags")
         assert resp.status_code == 200
-        names = {m["name"] for m in resp.json()["models"]}
+        names = {line.split(" | ")[0] for line in resp.text.strip().splitlines()}
         assert names == {"gemini-pro", "claude-sonnet", "copilot-365"}
+        assert "provider=gemini" in resp.text
 
 
 def test_chat_without_bridge_returns_503(app):
     with TestClient(app) as client:
         resp = client.post(
             "/api/chat",
-            json={"model": "gemini-pro", "messages": [{"role": "user", "content": "oi"}]},
+            data={"model": "gemini-pro", "role": "user", "content": "oi"},
         )
         assert resp.status_code == 503
-        assert "no bridge available" in resp.json()["error"]
+        assert "no bridge available" in resp.text
+        assert "text/plain" in resp.headers["content-type"]
 
 
 # ------------------------------------------------------------------ e2e bridge
 
 
-def test_generate_via_fake_extension(app):
+def test_chat_via_fake_extension(app):
     thread, ctx = start_fake_bridge("gemini", "A capoeira é uma arte afro-brasileira.")
     try:
         with TestClient(app) as client:
             resp = post_until(
                 client,
                 "/api/chat",
-                {"model": "gemini-pro", "messages": [{"role": "user", "content": "O que é capoeira?"}]},
+                {"model": "gemini-pro", "role": "user", "content": "O que é capoeira?"},
             )
             assert resp.status_code == 200
-            data = resp.json()
-            assert data["message"]["content"] == "A capoeira é uma arte afro-brasileira."
-            assert data["done"] is True
+            assert resp.text == "A capoeira é uma arte afro-brasileira."
+            assert "text/plain" in resp.headers["content-type"]
 
             assert ctx["received"], "bridge não recebeu SEND_PROMPT"
             payload = ctx["received"][0]["payload"]
@@ -235,7 +246,26 @@ def test_generate_via_fake_extension(app):
         thread.join(timeout=10)
 
 
-def test_streaming_ndjson_via_fake_extension(app):
+def test_generate_via_fake_extension(app):
+    thread, ctx = start_fake_bridge("gemini", "Expliquei a capoeira.")
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/generate",
+                {"model": "gemini-pro", "prompt": "O que é capoeira?"},
+            )
+            assert resp.status_code == 200
+            assert resp.text == "Expliquei a capoeira."
+            assert ctx["received"], "bridge não recebeu SEND_PROMPT"
+            payload = ctx["received"][0]["payload"]
+            assert "[SYSTEM]" in payload["systemPrompt"]
+            assert payload["newChat"] is True
+    finally:
+        thread.join(timeout=10)
+
+
+def test_streaming_plain_text_via_fake_extension(app):
     thread, ctx = start_fake_bridge(
         "claude",
         "A capoeira é uma arte.",
@@ -249,19 +279,14 @@ def test_streaming_ndjson_via_fake_extension(app):
                 "/api/chat",
                 {
                     "model": "claude-sonnet",
-                    "stream": True,
-                    "messages": [{"role": "user", "content": "O que é capoeira?"}],
+                    "stream": "true",
+                    "role": "user",
+                    "content": "O que é capoeira?",
                 },
             )
             assert resp.status_code == 200
-            assert "application/x-ndjson" in resp.headers["content-type"]
-
-            lines = [json.loads(line) for line in resp.text.strip().splitlines()]
-            assert len(lines) >= 3
-            content = "".join(chunk["message"]["content"] for chunk in lines if not chunk["done"])
-            assert content == "A capoeira é uma arte."
-            assert lines[-1]["done"] is True
-            assert lines[-1]["done_reason"] == "stop"
+            assert "text/plain" in resp.headers["content-type"]
+            assert resp.text == "A capoeira é uma arte."
             assert ctx["received"], "bridge não recebeu SEND_PROMPT"
     finally:
         thread.join(timeout=10)
@@ -271,8 +296,6 @@ def test_streaming_ndjson_via_fake_extension(app):
 
 
 def test_bridge_accepts_web_provider_origin(app):
-    """Repro do bug: um content script conecta ao WS com a origem da página
-    (https://gemini.google.com). O bridge deve aceitar e processar o chat."""
     thread, ctx = start_fake_bridge(
         "gemini",
         "A capoeira é uma arte afro-brasileira.",
@@ -283,10 +306,10 @@ def test_bridge_accepts_web_provider_origin(app):
             resp = post_until(
                 client,
                 "/api/chat",
-                {"model": "gemini-pro", "messages": [{"role": "user", "content": "oi"}]},
+                {"model": "gemini-pro", "role": "user", "content": "oi"},
             )
             assert resp.status_code == 200
-            assert resp.json()["message"]["content"] == "A capoeira é uma arte afro-brasileira."
+            assert resp.text == "A capoeira é uma arte afro-brasileira."
             assert ctx["received"], "bridge rejeitou a conexão com origem de página"
             assert ctx["error"] is None
     finally:
@@ -294,7 +317,6 @@ def test_bridge_accepts_web_provider_origin(app):
 
 
 def test_bridge_rejects_unknown_origin(app):
-    """Origem desconhecida deve continuar sendo rejeitada (CSWSH defense)."""
     thread, ctx = start_fake_bridge(
         "gemini",
         "nunca deve chegar",
@@ -304,7 +326,7 @@ def test_bridge_rejects_unknown_origin(app):
         with TestClient(app) as client:
             resp = client.post(
                 "/api/chat",
-                json={"model": "gemini-pro", "messages": [{"role": "user", "content": "oi"}]},
+                data={"model": "gemini-pro", "role": "user", "content": "oi"},
             )
             assert resp.status_code == 503
         thread.join(timeout=10)
@@ -331,11 +353,12 @@ def test_bridge_accepts_m365_copilot_origin(app):
                 "/api/chat",
                 {
                     "model": "copilot-365",
-                    "messages": [{"role": "user", "content": "Quem é você?"}],
+                    "role": "user",
+                    "content": "Quem é você?",
                 },
             )
             assert resp.status_code == 200
-            assert resp.json()["message"]["content"] == "Sou o Copilot da Microsoft 365."
+            assert resp.text == "Sou o Copilot da Microsoft 365."
             assert ctx["received"], "bridge rejeitou a origem de m365.cloud.microsoft"
             assert ctx["error"] is None
     finally:
@@ -349,13 +372,10 @@ def test_chat_via_copilot365_bridge(app):
             resp = post_until(
                 client,
                 "/api/chat",
-                {
-                    "model": "copilot-365",
-                    "messages": [{"role": "user", "content": "Oi Copilot"}],
-                },
+                {"model": "copilot-365", "role": "user", "content": "Oi Copilot"},
             )
             assert resp.status_code == 200
-            assert resp.json()["message"]["content"] == "Resposta do Copilot 365."
+            assert resp.text == "Resposta do Copilot 365."
             assert ctx["received"]
             payload = ctx["received"][0]["payload"]
             assert payload["provider"] == "copilot365"
@@ -368,14 +388,13 @@ def test_chat_via_copilot365_bridge(app):
 
 
 def test_chat_new_chat_false_from_global_default(app_reuse_chat):
-    """Com CAPOEIRA_NEW_CHAT=false, o SEND_PROMPT não deve iniciar novo chat."""
     thread, ctx = start_fake_bridge("gemini", "Resposta sem novo chat.")
     try:
         with TestClient(app_reuse_chat) as client:
             resp = post_until(
                 client,
                 "/api/chat",
-                {"model": "gemini-pro", "messages": [{"role": "user", "content": "oi"}]},
+                {"model": "gemini-pro", "role": "user", "content": "oi"},
             )
             assert resp.status_code == 200
             assert ctx["received"]
@@ -385,7 +404,6 @@ def test_chat_new_chat_false_from_global_default(app_reuse_chat):
 
 
 def test_chat_new_chat_false_via_request_override(app):
-    """Campo new_chat:false por requisição sobrescreve o default global (true)."""
     thread, ctx = start_fake_bridge("gemini", "Resposta sem novo chat.")
     try:
         with TestClient(app) as client:
@@ -394,8 +412,9 @@ def test_chat_new_chat_false_via_request_override(app):
                 "/api/chat",
                 {
                     "model": "gemini-pro",
-                    "new_chat": False,
-                    "messages": [{"role": "user", "content": "oi"}],
+                    "new_chat": "false",
+                    "role": "user",
+                    "content": "oi",
                 },
             )
             assert resp.status_code == 200
@@ -406,7 +425,6 @@ def test_chat_new_chat_false_via_request_override(app):
 
 
 def test_chat_new_chat_true_overrides_global_false(app_reuse_chat):
-    """Campo new_chat:true por requisição sobrescreve o default global (false)."""
     thread, ctx = start_fake_bridge("gemini", "Resposta com novo chat.")
     try:
         with TestClient(app_reuse_chat) as client:
@@ -415,8 +433,9 @@ def test_chat_new_chat_true_overrides_global_false(app_reuse_chat):
                 "/api/chat",
                 {
                     "model": "gemini-pro",
-                    "new_chat": True,
-                    "messages": [{"role": "user", "content": "oi"}],
+                    "new_chat": "true",
+                    "role": "user",
+                    "content": "oi",
                 },
             )
             assert resp.status_code == 200
@@ -427,52 +446,43 @@ def test_chat_new_chat_true_overrides_global_false(app_reuse_chat):
 
 
 def test_generate_new_chat_false_via_request_override(app):
-    """Campo new_chat:false também vale para /api/generate."""
     thread, ctx = start_fake_bridge("gemini", "Resposta sem novo chat.")
     try:
         with TestClient(app) as client:
             resp = post_until(
                 client,
                 "/api/generate",
-                {"model": "gemini-pro", "prompt": "oi", "new_chat": False},
+                {
+                    "model": "gemini-pro",
+                    "prompt": "oi",
+                    "new_chat": "false",
+                },
             )
             assert resp.status_code == 200
-            assert resp.json()["response"] == "Resposta sem novo chat."
+            assert resp.text == "Resposta sem novo chat."
             assert ctx["received"]
             assert ctx["received"][0]["payload"]["newChat"] is False
     finally:
         thread.join(timeout=10)
 
 
-# --------------------------- tool calling simulado ---------------------------
+# --------------------------- tool calling simulado (contrato textual) ---------------------------
 
 
-TOOLS_SAMPLE = [
-    {
-        "type": "function",
-        "function": {
-            "name": "shopping",
-            "description": "Consulta/prepara uma compra.",
-            "parameters": {
-                "type": "object",
-                "properties": {"item": {"type": "string"}, "quantidade": {"type": "integer"}},
-                "required": ["item"],
-            },
-        },
-    }
-]
+TOOLS_TEXT = (
+    "name=shopping | desc=Consulta/prepara uma compra. | item:string | quantidade:int"
+)
 
 
-def tool_call_line(name, arguments_json):
-    return f"[TOOL_CALL] {name} {arguments_json}"
+def tool_call_line(name, args_text):
+    return f"[TOOL_CALL] {name} | {args_text}"
 
 
-def test_tool_calling_returns_tool_calls(app):
+def test_tool_calling_returns_call_lines(app):
     """Com 'tools' presente, se a Web devolver a linha de contrato, o host
-    converte em message.tool_calls (formato Ollama) com content vazio."""
-    line_response = (
-        "Claro! Vou buscar isso pra você.\n"
-        + tool_call_line("shopping", '{"item": "leite", "quantidade": 2}')
+    devolve as linhas [TOOL_CALL] como text/plain (prosa removida)."""
+    line_response = "Claro! Vou buscar isso pra você.\n" + tool_call_line(
+        "shopping", "item=leite | quantidade=2"
     )
     thread, ctx = start_fake_bridge("gemini", line_response)
     try:
@@ -482,31 +492,28 @@ def test_tool_calling_returns_tool_calls(app):
                 "/api/chat",
                 {
                     "model": "gemini-pro",
-                    "tools": TOOLS_SAMPLE,
-                    "messages": [{"role": "user", "content": "Preciso comprar leite."}],
+                    "tools": TOOLS_TEXT,
+                    "role": "user",
+                    "content": "Preciso comprar leite.",
                 },
             )
             assert resp.status_code == 200
-            data = resp.json()
-            assert data["message"]["content"] == ""
-            calls = data["message"]["tool_calls"]
-            assert calls and calls[0]["function"]["name"] == "shopping"
-            assert calls[0]["function"]["arguments"] == {"item": "leite", "quantidade": 2}
+            assert resp.text == tool_call_line("shopping", "item=leite | quantidade=2")
             assert ctx["received"], "bridge não recebeu SEND_PROMPT"
-            prompt = ctx["received"][0]["payload"]["prompt"]
-            assert "[TOOLS]" in prompt
-            assert "[TOOL] " in prompt
-            assert "[MODE TOOL_CALLING]" in prompt
+            system = ctx["received"][0]["payload"]["systemPrompt"]
+            assert "[TOOLS]" in system
+            assert "[TOOL] name=shopping" in system
+            assert "[MODE TOOL_CALLING]" in system
     finally:
         thread.join(timeout=10)
 
 
 def test_tool_calling_parallel_calls(app):
-    """Várias linhas [TOOL_CALL] viram chamadas paralelas (lista)."""
+    """Várias linhas [TOOL_CALL] viram chamadas paralelas (uma por linha)."""
     line_response = (
-        tool_call_line("shopping", '{"item": "leite"}')
+        tool_call_line("shopping", "item=leite")
         + "\n"
-        + tool_call_line("shopping", '{"item": "pão", "quantidade": 3}')
+        + tool_call_line("shopping", "item=pão | quantidade=3")
     )
     thread, ctx = start_fake_bridge("gemini", line_response)
     try:
@@ -516,23 +523,24 @@ def test_tool_calling_parallel_calls(app):
                 "/api/chat",
                 {
                     "model": "gemini-pro",
-                    "tools": TOOLS_SAMPLE,
-                    "messages": [{"role": "user", "content": "Compre leite e pão."}],
+                    "tools": TOOLS_TEXT,
+                    "role": "user",
+                    "content": "Compre leite e pão.",
                 },
             )
             assert resp.status_code == 200
-            calls = resp.json()["message"]["tool_calls"]
-            assert len(calls) == 2
-            assert calls[0]["function"]["name"] == "shopping"
-            assert calls[1]["function"]["arguments"] == {"item": "pão", "quantidade": 3}
+            lines = [ln for ln in resp.text.strip().splitlines() if ln]
+            assert len(lines) == 2
+            assert lines[0].endswith("item=leite")
+            assert lines[1].endswith("item=pão | quantidade=3")
     finally:
         thread.join(timeout=10)
 
 
 def test_tool_calling_line_inside_code_fence(app):
-    """Linha [TOOL_CALL] envelopada em code fence (backticks no texto cru) ainda é
-    parseada — o render markdown arranca os backticks no innerText."""
-    line_response = "```text\n" + tool_call_line("shopping", '{"item": "leite"}') + "\n```"
+    """Linha [TOOL_CALL] envelopada em code fence ainda é parseada — o render
+    markdown arranca os backticks no innerText."""
+    line_response = "```text\n" + tool_call_line("shopping", "item=leite") + "\n```"
     thread, ctx = start_fake_bridge("gemini", line_response)
     try:
         with TestClient(app) as client:
@@ -541,20 +549,19 @@ def test_tool_calling_line_inside_code_fence(app):
                 "/api/chat",
                 {
                     "model": "gemini-pro",
-                    "tools": TOOLS_SAMPLE,
-                    "messages": [{"role": "user", "content": "Compre leite."}],
+                    "tools": TOOLS_TEXT,
+                    "role": "user",
+                    "content": "Compre leite.",
                 },
             )
             assert resp.status_code == 200
-            calls = resp.json()["message"]["tool_calls"]
-            assert calls and calls[0]["function"]["name"] == "shopping"
-            assert calls[0]["function"]["arguments"] == {"item": "leite"}
+            assert resp.text == tool_call_line("shopping", "item=leite")
     finally:
         thread.join(timeout=10)
 
 
 def test_tool_calling_falls_back_to_text(app):
-    """Se a Web responder texto (sem linha [TOOL_CALL]), faz fallback em content."""
+    """Se a Web responder texto (sem linha [TOOL_CALL]), faz fallback em texto."""
     thread, ctx = start_fake_bridge("gemini", "Vou verificar para você.")
     try:
         with TestClient(app) as client:
@@ -563,24 +570,23 @@ def test_tool_calling_falls_back_to_text(app):
                 "/api/chat",
                 {
                     "model": "gemini-pro",
-                    "tools": TOOLS_SAMPLE,
-                    "messages": [{"role": "user", "content": "Compre leite."}],
+                    "tools": TOOLS_TEXT,
+                    "role": "user",
+                    "content": "Compre leite.",
                 },
             )
             assert resp.status_code == 200
-            data = resp.json()
-            assert data["message"]["content"] == "Vou verificar para você."
-            assert not data.get("message", {}).get("tool_calls")
+            assert resp.text == "Vou verificar para você."
     finally:
         thread.join(timeout=10)
 
 
 def test_tool_calling_fallback_strips_invalid_lines(app):
-    """Linha [TOOL_CALL] inválida (sem nome parseável) é removida do texto de fallback."""
+    """Linha [TOOL_CALL] inválida (sem nome parseável) é removida do fallback."""
     line_response = (
         "Nunca vou chamar a ferramenta.\n"
         + "[TOOL_CALL]  {bad json}\n"
-        + tool_call_line("shopping", "{bad json}")
+        + "[TOOL_CALL] shopping {bad json}"
     )
     thread, ctx = start_fake_bridge("gemini", line_response)
     try:
@@ -590,72 +596,75 @@ def test_tool_calling_fallback_strips_invalid_lines(app):
                 "/api/chat",
                 {
                     "model": "gemini-pro",
-                    "tools": TOOLS_SAMPLE,
-                    "messages": [{"role": "user", "content": "Compre leite."}],
+                    "tools": TOOLS_TEXT,
+                    "role": "user",
+                    "content": "Compre leite.",
                 },
             )
             assert resp.status_code == 200
-            data = resp.json()
-            assert data["message"]["content"] == "Nunca vou chamar a ferramenta."
-            assert not data.get("message", {}).get("tool_calls")
+            assert resp.text == "Nunca vou chamar a ferramenta."
     finally:
         thread.join(timeout=10)
 
 
 def test_tool_result_roundtrip_accepted(app):
-    """Assistant com tool_calls + role 'tool' são aceitos quando 'tools' presente
-    e o resultado fica no transcript (TOOL_RESULT)."""
+    """Role 'tool' + tools mantêm o resultado no transcript (TOOL_RESULT)."""
     thread, ctx = start_fake_bridge("gemini", "Você tem 2 leites.")
     try:
         with TestClient(app) as client:
             resp = post_until(
                 client,
                 "/api/chat",
-                {
-                    "model": "gemini-pro",
-                    "tools": TOOLS_SAMPLE,
-                    "messages": [
-                        {"role": "user", "content": "Preciso de leite."},
-                        {
-                            "role": "assistant",
-                            "content": "",
-                            "tool_calls": [
-                                {"function": {"name": "shopping", "arguments": {"item": "leite"}}}
-                            ],
-                        },
-                        {"role": "tool", "content": "Leite comprado", "tool_call_id": "call-1"},
-                    ],
-                },
+                [
+                    ("model", "gemini-pro"),
+                    ("tools", TOOLS_TEXT),
+                    ("role", "assistant"),
+                    ("content", tool_call_line("shopping", "item=leite")),
+                    ("role", "tool"),
+                    ("content", "Leite comprado"),
+                    ("tool_call_id", "call-1"),
+                ],
             )
             assert resp.status_code == 200
-            assert resp.json()["message"]["content"] == "Você tem 2 leites."
+            assert resp.text == "Você tem 2 leites."
             assert ctx["received"]
             prompt = ctx["received"][0]["payload"]["prompt"]
-            assert "[TOOL_RESULT]" in prompt
-            assert "[TOOL_CALL] shopping" in prompt
+            assert "[TOOL_RESULT] (call-1)" in prompt
+            assert "[TOOL_CALL] shopping | item=leite" in prompt
     finally:
         thread.join(timeout=10)
 
 
-def test_tool_call_and_role_tool_rejected_without_tools(app):
-    """Sem 'tools' no request, tool_calls / role 'tool' continuam rejeitados (400)."""
+def test_role_tool_rejected_without_tools(app):
+    """Sem 'tools' no request, role 'tool' continua rejeitado (400)."""
     with TestClient(app) as client:
         resp = client.post(
             "/api/chat",
-            json={
+            data={
                 "model": "gemini-pro",
-                "messages": [
-                    {"role": "tool", "content": "ok", "tool_call_id": "call-1"},
-                ],
+                "role": "tool",
+                "content": "ok",
+                "tool_call_id": "call-1",
             },
         )
         assert resp.status_code == 400
-        assert "tools" in resp.json()["error"]
+        assert "tools" in resp.text
 
 
-def test_tool_calling_streaming_emits_calls_on_final_chunk(app):
-    """Em streaming com tools, os tool_calls aparecem apenas no chunk final (done)."""
-    line_response = tool_call_line("shopping", '{"item": "leite"}')
+def test_unknown_role_rejected(app):
+    """Role fora do permitido é rejeitado (400)."""
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/chat",
+            data={"model": "gemini-pro", "role": "banana", "content": "oi"},
+        )
+        assert resp.status_code == 400
+        assert "messages" in resp.text
+
+
+def test_tool_calling_streaming_emits_calls(app):
+    """Em streaming com tools, as chamadas aparecem no texto final."""
+    line_response = tool_call_line("shopping", "item=leite")
     thread, ctx = start_fake_bridge("gemini", line_response)
     try:
         with TestClient(app) as client:
@@ -664,111 +673,45 @@ def test_tool_calling_streaming_emits_calls_on_final_chunk(app):
                 "/api/chat",
                 {
                     "model": "gemini-pro",
-                    "stream": True,
-                    "tools": TOOLS_SAMPLE,
-                    "messages": [{"role": "user", "content": "Compre leite."}],
+                    "stream": "true",
+                    "tools": TOOLS_TEXT,
+                    "role": "user",
+                    "content": "Compre leite.",
                 },
             )
             assert resp.status_code == 200
-            lines = [json.loads(line) for line in resp.text.strip().splitlines()]
-            assert lines[-1]["done"] is True
-            msg = lines[-1]["message"]
-            assert msg["content"] == ""
-            assert msg["tool_calls"][0]["function"]["name"] == "shopping"
+            assert resp.text == tool_call_line("shopping", "item=leite")
     finally:
         thread.join(timeout=10)
 
 
-# --------------------------- format json (saída via marcadores) ---------------------------
+# --------------------------- validação de form ---------------------------
 
 
-def json_output_response():
-    return (
-        "Aqui está o resultado:\n"
-        "[JSON_START]\n"
-        '{"capoeira": "arte", "origem": "Brasil"}\n'
-        "[JSON_END]"
-    )
+def test_generate_requires_prompt(app):
+    with TestClient(app) as client:
+        resp = client.post("/api/generate", data={"model": "gemini-pro"})
+        assert resp.status_code == 400
+        assert "prompt" in resp.text
 
 
-def test_generate_format_json_extracts_output(app):
-    """Com format:'json', o JSON entre [JSON_START]/[JSON_END] é extraído mesmo com
-    prosa ao redor (mesma tolerância do tool calling)."""
-    thread, ctx = start_fake_bridge("gemini", json_output_response())
-    try:
-        with TestClient(app) as client:
-            resp = post_until(
-                client,
-                "/api/generate",
-                {"model": "gemini-pro", "prompt": "o que é capoeira?", "format": "json"},
-            )
-            assert resp.status_code == 200
-            expected = '{"capoeira": "arte", "origem": "Brasil"}'
-            assert resp.json()["response"] == expected
-            assert ctx["received"]
-            prompt = ctx["received"][0]["payload"]["systemPrompt"]
-            assert "[MODE_JSON]" in prompt
-            assert "[JSON_START]" in prompt
-            assert "[JSON_END]" in prompt
-    finally:
-        thread.join(timeout=10)
+def test_create_show_delete(app):
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/create",
+            data={"model": "meu-perfil", "from": "gemini", "parameter.temperature": "0.5"},
+        )
+        assert resp.status_code == 200
+        assert resp.text == "ok"
 
+        resp = client.post("/api/show", data={"model": "meu-perfil"})
+        assert resp.status_code == 200
+        assert "model: meu-perfil" in resp.text
+        assert "provider: gemini" in resp.text
 
-def test_generate_format_json_fallback_without_markers(app):
-    """Sem marcadores [JSON_START]/[JSON_END], o texto cru é devolvido (fallback)."""
-    thread, ctx = start_fake_bridge("gemini", "Resposta surreal.")
-    try:
-        with TestClient(app) as client:
-            resp = post_until(
-                client,
-                "/api/generate",
-                {"model": "gemini-pro", "prompt": "oi", "format": "json"},
-            )
-            assert resp.status_code == 200
-            assert resp.json()["response"] == "Resposta surreal."
-    finally:
-        thread.join(timeout=10)
+        resp = client.request("DELETE", "/api/delete", data={"model": "meu-perfil"})
+        assert resp.status_code == 200
+        assert resp.text == "ok"
 
-
-def test_chat_format_json_extracts_output(app):
-    """Em /api/chat com format:'json', o content é o JSON extraído dos marcadores."""
-    thread, ctx = start_fake_bridge("gemini", json_output_response())
-    try:
-        with TestClient(app) as client:
-            resp = post_until(
-                client,
-                "/api/chat",
-                {
-                    "model": "gemini-pro",
-                    "format": "json",
-                    "messages": [{"role": "user", "content": "o que é capoeira?"}],
-                },
-            )
-            assert resp.status_code == 200
-            assert resp.json()["message"]["content"] == '{"capoeira": "arte", "origem": "Brasil"}'
-            assert not resp.json()["message"].get("tool_calls")
-    finally:
-        thread.join(timeout=10)
-
-
-def test_chat_format_json_without_tools_has_no_tool_contract(app):
-    """format:'json' sem tools não injeta o contrato de tool calling."""
-    thread, ctx = start_fake_bridge("gemini", "ok")
-    try:
-        with TestClient(app) as client:
-            resp = post_until(
-                client,
-                "/api/chat",
-                {
-                    "model": "gemini-pro",
-                    "format": "json",
-                    "messages": [{"role": "user", "content": "oi"}],
-                },
-            )
-            assert resp.status_code == 200
-            system = ctx["received"][0]["payload"]["systemPrompt"]
-            assert "[MODE_JSON]" in system
-            assert "[MODE TOOL_CALLING]" not in system
-            assert "[TOOLS]" not in system
-    finally:
-        thread.join(timeout=10)
+        resp = client.post("/api/show", data={"model": "meu-perfil"})
+        assert resp.status_code == 404
