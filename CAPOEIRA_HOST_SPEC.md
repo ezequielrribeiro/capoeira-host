@@ -322,16 +322,25 @@ Resposta **stream** (NDJSON):
 ```
 
 > **Tool calling simulado**: quando o request traz `tools`, o CapoeiraHost injeta as
-> definições no envelope de system prompt e instrui o modelo Web a responder com um
-> JSON de contrato — `{"name": "...", "arguments": {...}}` (chamar ferramenta) ou
-> `{"text": "..."}` (responder direto). O gateway converte o contrato em
-> `message.tool_calls` no formato Ollama (`[{"function": {"name", "arguments"}}]`).
-> Se a resposta não for um tool call válido, faz **fallback** devolvendo o texto em
-> `message.content`. Nesse modo também são aceitos assistant com `tool_calls` e
-> mensagens `role: "tool"` (`tool_call_id` + `content`) para continuar o ciclo.
+> definições no envelope de system prompt e instrui o modelo Web a emitir **uma linha de
+> texto puro por chamada** no formato `[TOOL_CALL] nome {"args": ...}` — sem blocos de
+> código/markdown. O gateway faz **scan por regex** em todo o texto (tolerante a prosa ao
+> redor), converte cada linha em `message.tool_calls` no formato Ollama
+> (`[{"function": {"name", "arguments"}}]`), e múltiplas linhas viram chamadas **paralelas**.
+> Se não houver linha válida, faz **fallback** devolvendo o texto (com as linhas `[TOOL_CALL]`
+> removidas) em `message.content`. Nesse modo também são aceitos assistant com
+> `tool_calls` e mensagens `role: "tool"` (`tool_call_id` + `content`) para continuar o ciclo.
+>
+> **Contrato de tool call** (enviado no system envelope):
 >
 > **Sem `tools` no request**: `role: "tool"` ou `tool_calls` → `400 Bad Request`
 > (`{"error":"tool calls / role 'tool' exigem a lista 'tools' no request (tool calling simulado)"}`).
+
+Exemplo de resposta do modelo Web com tool call (1 linha por chamada; prosa opcional antes/depois):
+
+```text
+[TOOL_CALL] shopping {"item": "leite", "quantidade": 2}
+```
 
 ### 5.6. `POST /api/show`
 

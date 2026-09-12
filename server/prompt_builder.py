@@ -8,10 +8,16 @@ PROVIDERS = ("gemini", "claude", "copilot365", "chatgpt")
 OPTION_HINTS = ("temperature", "top_k", "top_p", "num_predict", "num_ctx", "seed", "stop")
 
 TOOL_CALL_CONTRACT = (
-    '[MODE TOOL_CALLING] Se for necessário chamar uma ferramenta, responda APENAS com um '
-    'objeto JSON válido, sem markdown e sem texto fora dele, neste formato exato: '
-    '{"name": "<nome da ferramenta>", "arguments": {<argumentos>}}. Caso contrário, '
-    'responda APENAS com este outro objeto JSON válido: {"text": "<sua resposta>"}.'
+    '[MODE TOOL_CALLING] Se for necessário chamar uma ferramenta, emita EXATAMENTE '
+    'uma linha por chamada neste formato (sem blocos de código e sem markdown):\n'
+    '\n'
+    '[TOOL_CALL] nome_da_ferramenta {"chave": "valor"}\n'
+    '\n'
+    'Cada chamada é uma linha começando com [TOOL_CALL], seguido do nome da '
+    'ferramenta e dos argumentos como um objeto JSON válido respeitando o schema '
+    'de "parameters" da ferramenta. Para chamadas paralelas, emita uma linha por '
+    'chamada. Pode haver texto antes e depois das linhas. Se não for chamar '
+    'ferramenta, responda normalmente com texto.'
 )
 
 

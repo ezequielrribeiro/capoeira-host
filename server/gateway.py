@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from datetime import datetime, timezone
 from typing import AsyncGenerator
@@ -17,41 +18,35 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _parse_tool_call(raw: str) -> list[dict] | None:
-    """Tenta extrair uma tool call do texto cru vindo da Web. Retorna a lista
-    de tool_calls (formato Ollama) se o texto for um JSON de contrato válido."""
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip("`").strip()
-    try:
-        payload = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    if "name" in payload and "arguments" in payload:
-        return [{"function": {"name": payload["name"], "arguments": payload["arguments"]}}]
-    return None
+_TOOL_CALL_LINE = re.compile(r"(?m)^\s*\[TOOL_CALL\]\s+([^\s}{]+)\s*(\{.*\})?\s*$")
+_TOOL_CALL_ANY_LINE = re.compile(r"(?m)^\s*\[TOOL_CALL\].*$")
 
 
-def _extract_text(raw: str) -> str | None:
-    """Se a resposta for o contrato {'text': ...}, devolve só o texto; senão None."""
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip("`").strip()
-    try:
-        payload = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if isinstance(payload, dict) and "text" in payload:
-        return str(payload["text"])
-    return None
+def _parse_tool_call_lines(raw: str) -> list[dict] | None:
+    """Extrai tool calls do contrato de linha única telegrafado pelo modelo Web.
+    Faz scan por regex linha a linha (tolerante a prosa ao redor e a code fences,
+    já que o conteúdo ressurge sem backticks no innerText). Exige nome válido e
+    argumentos como objeto JSON — linhas malformadas são ignoradas. Retorna
+    tool_calls no formato Ollama, ou None se não houver linha válida."""
+    calls: list[dict] = []
+    for name, args_text in _TOOL_CALL_LINE.findall(raw or ""):
+        name = name.strip()
+        args_text = (args_text or "").strip()
+        if not name or not args_text:
+            continue
+        try:
+            arguments = json.loads(args_text)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(arguments, dict):
+            continue
+        calls.append({"function": {"name": name, "arguments": arguments}})
+    return calls or None
+
+
+def _strip_tool_call_lines(raw: str) -> str:
+    """Remove as linhas [TOOL_CALL] do texto (válidas ou não), deixando só a prosa."""
+    return _TOOL_CALL_ANY_LINE.sub("", raw or "").strip()
 
 
 def _metrics(execution_ms: float, text: str) -> dict:
@@ -172,7 +167,7 @@ class Gateway:
                 exec_ms = float((done_payload or {}).get("executionTimeMs") or 0)
                 full = (done_payload or {}).get("rawResponse") or ""
                 if tool_mode:
-                    tool_calls = _parse_tool_call(full)
+                    tool_calls = _parse_tool_call_lines(full)
                     if tool_calls:
                         yield {
                             "model": profile.name,
@@ -183,10 +178,8 @@ class Gateway:
                             **_metrics(exec_ms, full),
                         }
                         return
-                    unwrapped = _extract_text(full)
-                    if unwrapped is not None:
-                        full = unwrapped
-                        transmitted = unwrapped
+                    full = _strip_tool_call_lines(full)
+                    transmitted = full
                 delta = full[len(transmitted):]
                 if delta and not tool_mode:
                     transmitted += delta

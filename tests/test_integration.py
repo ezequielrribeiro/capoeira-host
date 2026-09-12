@@ -463,11 +463,18 @@ TOOLS_SAMPLE = [
 ]
 
 
+def tool_call_line(name, arguments_json):
+    return f"[TOOL_CALL] {name} {arguments_json}"
+
+
 def test_tool_calling_returns_tool_calls(app):
-    """Com 'tools' presente, se a Web devolver o JSON de contrato, o host
+    """Com 'tools' presente, se a Web devolver a linha de contrato, o host
     converte em message.tool_calls (formato Ollama) com content vazio."""
-    tool_json = '{"name": "shopping", "arguments": {"item": "leite", "quantidade": 2}}'
-    thread, ctx = start_fake_bridge("gemini", tool_json)
+    line_response = (
+        "Claro! Vou buscar isso pra você.\n"
+        + tool_call_line("shopping", '{"item": "leite", "quantidade": 2}')
+    )
+    thread, ctx = start_fake_bridge("gemini", line_response)
     try:
         with TestClient(app) as client:
             resp = post_until(
@@ -493,8 +500,60 @@ def test_tool_calling_returns_tool_calls(app):
         thread.join(timeout=10)
 
 
+def test_tool_calling_parallel_calls(app):
+    """Várias linhas [TOOL_CALL] viram chamadas paralelas (lista)."""
+    line_response = (
+        tool_call_line("shopping", '{"item": "leite"}')
+        + "\n"
+        + tool_call_line("shopping", '{"item": "pão", "quantidade": 3}')
+    )
+    thread, ctx = start_fake_bridge("gemini", line_response)
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {
+                    "model": "gemini-pro",
+                    "tools": TOOLS_SAMPLE,
+                    "messages": [{"role": "user", "content": "Compre leite e pão."}],
+                },
+            )
+            assert resp.status_code == 200
+            calls = resp.json()["message"]["tool_calls"]
+            assert len(calls) == 2
+            assert calls[0]["function"]["name"] == "shopping"
+            assert calls[1]["function"]["arguments"] == {"item": "pão", "quantidade": 3}
+    finally:
+        thread.join(timeout=10)
+
+
+def test_tool_calling_line_inside_code_fence(app):
+    """Linha [TOOL_CALL] envelopada em code fence (backticks no texto cru) ainda é
+    parseada — o render markdown arranca os backticks no innerText."""
+    line_response = "```text\n" + tool_call_line("shopping", '{"item": "leite"}') + "\n```"
+    thread, ctx = start_fake_bridge("gemini", line_response)
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {
+                    "model": "gemini-pro",
+                    "tools": TOOLS_SAMPLE,
+                    "messages": [{"role": "user", "content": "Compre leite."}],
+                },
+            )
+            assert resp.status_code == 200
+            calls = resp.json()["message"]["tool_calls"]
+            assert calls and calls[0]["function"]["name"] == "shopping"
+            assert calls[0]["function"]["arguments"] == {"item": "leite"}
+    finally:
+        thread.join(timeout=10)
+
+
 def test_tool_calling_falls_back_to_text(app):
-    """Se a Web responder texto (não JSON de contrato), faz fallback em content."""
+    """Se a Web responder texto (sem linha [TOOL_CALL]), faz fallback em content."""
     thread, ctx = start_fake_bridge("gemini", "Vou verificar para você.")
     try:
         with TestClient(app) as client:
@@ -515,10 +574,37 @@ def test_tool_calling_falls_back_to_text(app):
         thread.join(timeout=10)
 
 
+def test_tool_calling_fallback_strips_invalid_lines(app):
+    """Linha [TOOL_CALL] inválida (sem nome parseável) é removida do texto de fallback."""
+    line_response = (
+        "Nunca vou chamar a ferramenta.\n"
+        + "[TOOL_CALL]  {bad json}\n"
+        + tool_call_line("shopping", "{bad json}")
+    )
+    thread, ctx = start_fake_bridge("gemini", line_response)
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {
+                    "model": "gemini-pro",
+                    "tools": TOOLS_SAMPLE,
+                    "messages": [{"role": "user", "content": "Compre leite."}],
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["message"]["content"] == "Nunca vou chamar a ferramenta."
+            assert not data.get("message", {}).get("tool_calls")
+    finally:
+        thread.join(timeout=10)
+
+
 def test_tool_result_roundtrip_accepted(app):
     """Assistant com tool_calls + role 'tool' são aceitos quando 'tools' presente
     e o resultado fica no transcript (TOOL_RESULT)."""
-    thread, ctx = start_fake_bridge("gemini", '{"text": "Você tem 2 leites."}')
+    thread, ctx = start_fake_bridge("gemini", "Você tem 2 leites.")
     try:
         with TestClient(app) as client:
             resp = post_until(
@@ -568,8 +654,8 @@ def test_tool_call_and_role_tool_rejected_without_tools(app):
 
 def test_tool_calling_streaming_emits_calls_on_final_chunk(app):
     """Em streaming com tools, os tool_calls aparecem apenas no chunk final (done)."""
-    tool_json = '{"name": "shopping", "arguments": {"item": "leite"}}'
-    thread, ctx = start_fake_bridge("gemini", tool_json)
+    line_response = tool_call_line("shopping", '{"item": "leite"}')
+    thread, ctx = start_fake_bridge("gemini", line_response)
     try:
         with TestClient(app) as client:
             resp = post_until(
