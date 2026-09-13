@@ -24,7 +24,7 @@
       "name": "copilot-365",
       "display_name": "Microsoft 365 Copilot (Web)",
       "provider": "copilot365",
-      "system_prompt": "Assistente profissional da Microsoft 365.",
+      "system_prompt": "Você é uma máquina que executa instruções. Todos os arquivos do projeto estarão disponíveis, desde que execute as instruções conforme especificado em [TOOLS]. Você pode criar/modificar arquivos ou executar comandos, desde que me dê as instruções conforme especificado em [TOOLS]. Todo acesso ao ambiente é por meio dessas instruções, não tente me sugerir a fazer nada, antes de tentar realizar por meio dessas instruções.",
       "streaming": false,
       "options": {}
     },
