@@ -441,7 +441,9 @@ O gateway transforma a requisição (form) no prompt da Web:
    com tags de linha única (`[SYSTEM]`, `[USER]`, `[ASSISTANT]`, `[TOOL_CALL] nome |
    chave=valor`, `[TOOL_RESULT] (id) conteúdo`) dentro do `prompt`, precedidas do
    system. Por padrão, cada requisição inicia **novo chat na Web** (`new_chat=true`);
-   quando `new_chat=false`, a extensão injeta no chat aberto.
+   quando `new_chat=false`, a extensão injeta no chat aberto e emite os headers do
+   system apenas na **primeira interação da sessão** — nas iterações seguintes envia
+   só o transcript (sem `[SYSTEM]`/`[TOOLS]`) até que um `new_chat=true` reinicie a sessão.
 
 3. **Templates**: se o perfil define `template`, aplicado sobre `system + prompt`.
 

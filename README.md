@@ -254,6 +254,10 @@ Resposta: `text/plain` com a resposta do assistente.
 > do provedor (`newChat: true`). Para continuar a mesma conversa (menos "pisca" e
 > contexto real na Web), defina `CAPOEIRA_NEW_CHAT=false` (global) ou envie
 > `new_chat=false` no form (por requisição; o valor por requisição tem precedência).
+> Nesse modo, apenas a **primeira interação da sessão** emite os headers do system
+> (`[SYSTEM]`/`[OPTIONS]`/`[TOOLS]`); nas iterações seguintes a extensão injeta só o
+> transcript (prompt), sem repetir esses headers. Iniciar um novo chat
+> (`new_chat=true`) reemite os headers.
 
 ### Tool calling simulado (contrato textual)
 

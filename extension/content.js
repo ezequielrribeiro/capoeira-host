@@ -7,6 +7,7 @@
 
   let socket = null;
   let reconnectDelay = RECONNECT_BASE_MS;
+  let systemHeadersSeeded = false;
 
   function getActiveAdapter() {
     const adapters = window.CapoeiraHostAdapters || [];
@@ -74,9 +75,12 @@
     try {
       if (payload.newChat && adapter.supportsNewChat) {
         await adapter.startNewChat();
+        systemHeadersSeeded = false;
       }
-      const fullPrompt = `${payload.systemPrompt || ""}\n\n${payload.prompt || ""}`.trim();
+      const system = systemHeadersSeeded ? "" : (payload.systemPrompt || "");
+      const fullPrompt = `${system}\n\n${payload.prompt || ""}`.trim();
       await adapter.injectText(fullPrompt);
+      systemHeadersSeeded = true;
       await waitForCompletion(adapter, msg.id, startedAt);
     } catch (err) {
       sendMessage(msg.id, "ERROR", null, String((err && err.message) || err));
