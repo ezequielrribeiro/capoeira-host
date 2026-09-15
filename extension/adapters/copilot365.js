@@ -3,6 +3,12 @@ window.registerAdapter({
   match: () => window.location.hostname.endsWith("m365.cloud.microsoft"),
   supportsStreaming: false,
   supportsNewChat: true,
+  supportsTranscript: true,
+
+  transcriptSelectors: {
+    user: '[data-message-role="user"], .fai-BebopLiteChatMessage.userMessage',
+    assistant: '[id^="response-id_"]'
+  },
 
   SEND_LABELS: ["send", "enviar"],
   STOP_LABELS: ["stop", "parar", "cancel", "cancelar"],

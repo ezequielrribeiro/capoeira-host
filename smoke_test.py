@@ -10,6 +10,8 @@ Uso:
     python smoke_test.py --endpoint generate --prompt "O que é capoeira?" --stream
     python smoke_test.py --model claude-sonnet --stream
     python smoke_test.py --endpoint chat --new-chat false
+    python smoke_test.py --endpoint read
+    python smoke_test.py --endpoint watch --revision 3 --timeout 20
 """
 
 from __future__ import annotations
@@ -47,9 +49,13 @@ def build_fields(args) -> list[tuple[str, str]]:
     fields: list[tuple[str, str]] = [("model", args.model)]
     if args.endpoint == "generate":
         fields.append(("prompt", args.prompt))
-    else:
+    elif args.endpoint == "chat":
         fields.append(("role", "user"))
         fields.append(("content", args.prompt))
+    elif args.endpoint == "watch":
+        fields.append(("revision", str(args.revision)))
+        if args.timeout:
+            fields.append(("timeout", str(args.timeout)))
     if args.stream:
         fields.append(("stream", "true"))
     if args.new_chat is not None:
@@ -79,6 +85,9 @@ def read_non_stream(url: str, fields: list[tuple[str, str]]) -> None:
     try:
         with urllib.request.urlopen(build_request(url, fields)) as resp:
             print(f"HTTP {resp.status} ({resp.headers.get('Content-Type', '')})")
+            revision = resp.headers.get("X-Capoeira-Revision")
+            if revision:
+                print(f"X-Capoeira-Revision: {revision}")
             print(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         handle_http_error(exc)
@@ -110,13 +119,25 @@ def main() -> None:
     parser.add_argument("--base-url", default=default_base_url())
     parser.add_argument("--model", default="gemini-pro")
     parser.add_argument("--prompt", default="Olá! O que é capoeira? Responda em uma frase.")
-    parser.add_argument("--endpoint", choices=["generate", "chat"], default="chat")
+    parser.add_argument("--endpoint", choices=["generate", "chat", "read", "watch"], default="chat")
     parser.add_argument("--stream", action="store_true")
     parser.add_argument(
         "--new-chat",
         choices=["true", "false"],
         default=None,
         help="Sobrescreve CAPOEIRA_NEW_CHAT por requisição (ausente = default do servidor).",
+    )
+    parser.add_argument(
+        "--revision",
+        type=int,
+        default=0,
+        help="Última revision vista (endpoint 'watch'); eventos com revision maior são devolvidos.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="Tempo (s) de bloqueio no 'watch' antes de retornar vazio.",
     )
     args = parser.parse_args()
 

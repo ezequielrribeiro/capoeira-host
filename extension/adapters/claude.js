@@ -3,6 +3,12 @@ window.registerAdapter({
   match: () => window.location.hostname.includes("claude.ai"),
   supportsStreaming: true,
   supportsNewChat: true,
+  supportsTranscript: true,
+
+  transcriptSelectors: {
+    user: ".font-normal",
+    assistant: ".font-claude-message"
+  },
 
   getSelectors: () => ({
     inputArea: '[contenteditable="true"].ProseMirror, textarea',

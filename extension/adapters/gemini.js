@@ -3,6 +3,12 @@ window.registerAdapter({
   match: () => window.location.hostname.includes("gemini.google.com"),
   supportsStreaming: false,
   supportsNewChat: true,
+  supportsTranscript: true,
+
+  transcriptSelectors: {
+    user: ".user-query",
+    assistant: ".model-response-text"
+  },
 
   getSelectors: () => ({
     inputArea: '.input-area div[contenteditable="true"], textarea',

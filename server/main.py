@@ -14,6 +14,7 @@ from .gateway import Gateway
 from .http_api import build_router
 from .queue import RequestScheduler
 from .registry import ModelRegistry
+from .watcher import ChatWatcher
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -21,7 +22,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        bridge = BridgeServer(settings.host, settings.ws_port)
+        watcher = ChatWatcher()
+        bridge = BridgeServer(
+            settings.host,
+            settings.ws_port,
+            on_chat_update=watcher.ingest,
+        )
         scheduler = RequestScheduler(bridge, queue_size=settings.queue_size, timeout=settings.timeout)
         registry = ModelRegistry(settings.models_file)
         gateway = Gateway(scheduler)
@@ -31,6 +37,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.scheduler = scheduler
         app.state.registry = registry
         app.state.gateway = gateway
+        app.state.watcher = watcher
 
         await bridge.start()
         try:

@@ -85,9 +85,21 @@ def app_reuse_chat(models_file):
     return create_app(settings)
 
 
-def start_fake_bridge(provider, response_text, *, streaming=False, partials=None, origin=None):
+def start_fake_bridge(
+    provider,
+    response_text,
+    *,
+    streaming=False,
+    partials=None,
+    origin=None,
+    transcript=None,
+    supports_transcript=True,
+    chat_updates=None,
+):
     """Simula a extensão do navegador: conecta no WS do bridge, envia HELLO,
     aguarda SEND_PROMPT e devolve parciais (se streaming) + RESPONSE final.
+    Encaminha READ_CHAT devolvendo RESPONSE com o ``transcript``, e pode emitar
+    ``chat_updates`` (payloads de CHAT_UPDATE) logo após o HELLO.
 
     ``origin`` permite simular a origem que o navegador envia (ex.: a origem da
     página em um content script, como ``https://gemini.google.com``)."""
@@ -98,6 +110,7 @@ def start_fake_bridge(provider, response_text, *, streaming=False, partials=None
         "streaming": streaming,
         "partials": partials or [],
         "response_text": response_text,
+        "transcript": transcript or [],
     }
 
     def worker():
@@ -119,14 +132,42 @@ def start_fake_bridge(provider, response_text, *, streaming=False, partials=None
                                 "adapters": [provider],
                                 "supportsStreaming": streaming,
                                 "supportsNewChat": True,
+                                "supportsTranscript": supports_transcript,
                                 "tabTitle": "Teste CapoeiraHost",
                             },
                         }
                     )
                 )
+                for update in chat_updates or []:
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "version": "1.0",
+                                "action": "CHAT_UPDATE",
+                                "id": str(uuid.uuid4()),
+                                "payload": update,
+                            }
+                        )
+                    )
+                    await asyncio.sleep(0.05)
                 async for raw in ws:
                     msg = json.loads(raw)
-                    if msg.get("action") != "SEND_PROMPT":
+                    action = msg.get("action")
+                    if action == "READ_CHAT":
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "version": "1.0",
+                                    "action": "RESPONSE",
+                                    "status": "SUCCESS",
+                                    "id": msg["id"],
+                                    "payload": {"transcript": ctx["transcript"]},
+                                    "error": None,
+                                }
+                            )
+                        )
+                        continue
+                    if action != "SEND_PROMPT":
                         continue
                     ctx["received"].append(msg)
                     for partial in ctx["partials"]:
@@ -187,6 +228,22 @@ def post_until(client, path, fields, timeout=POLL_TIMEOUT):
         if last.status_code != 503:
             return last
         time.sleep(0.05)
+    return last
+
+
+def watch_until(client, path, fields, timeout=POLL_TIMEOUT):
+    """Repete o POST até a resposta vir 200 com texto não vazio, ou o provider
+    responder erro definitivo (400/501); 503 (ainda conectando) e 200 com corpo
+    vazio (sem update) fazem manter o loop até o timeout."""
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        last = client.post(path, data=fields)
+        if last.status_code not in (200, 503):
+            return last
+        if last.status_code == 200 and last.text.strip():
+            return last
+        time.sleep(0.1)
     return last
 
 
@@ -681,6 +738,147 @@ def test_tool_calling_streaming_emits_calls(app):
             )
             assert resp.status_code == 200
             assert resp.text == tool_call_line("shopping", "item=leite")
+    finally:
+        thread.join(timeout=10)
+
+
+# --------------------------- read / watch do chat ---------------------------
+
+
+TRANSCRIPT = [
+    {"role": "user", "content": "Quem foi Besouro Mangangá?"},
+    {"role": "assistant", "content": "Uma lenda da capoeira do recôncavo baiano."},
+]
+
+
+def test_chat_read_returns_transcript(app):
+    thread, ctx = start_fake_bridge("gemini", "irrelevante", transcript=TRANSCRIPT)
+    try:
+        with TestClient(app) as client:
+            resp = post_until(client, "/api/chat/read", {"model": "gemini-pro"})
+            assert resp.status_code == 200
+            assert "text/plain" in resp.headers["content-type"]
+            assert "[USER] Quem foi Besouro Mangangá?" in resp.text
+            assert "[ASSISTANT] Uma lenda da capoeira do recôncavo baiano." in resp.text
+    finally:
+        thread.join(timeout=10)
+
+
+def test_chat_read_requires_model(app):
+    thread, ctx = start_fake_bridge("gemini", "irrelevante", transcript=TRANSCRIPT)
+    try:
+        with TestClient(app) as client:
+            resp = post_until(client, "/api/chat/read", {})
+            assert resp.status_code == 400
+            assert "model" in resp.text
+    finally:
+        thread.join(timeout=10)
+
+
+def test_chat_read_offline_503(app):
+    with TestClient(app) as client:
+        resp = client.post("/api/chat/read", data={"model": "gemini-pro"})
+        assert resp.status_code == 503
+        assert "no bridge available" in resp.text
+
+
+def test_chat_read_no_transcript_support_501(app):
+    thread, ctx = start_fake_bridge("gemini", "x", supports_transcript=False)
+    try:
+        with TestClient(app) as client:
+            resp = post_until(client, "/api/chat/read", {"model": "gemini-pro"})
+            assert resp.status_code == 501
+            assert "transcript" in resp.text
+    finally:
+        thread.join(timeout=10)
+
+
+def test_chat_watch_returns_delta(app):
+    update = {
+        "revision": 1,
+        "transcript": TRANSCRIPT,
+        "messages": TRANSCRIPT,
+    }
+    thread, ctx = start_fake_bridge("gemini", "x", chat_updates=[update])
+    try:
+        with TestClient(app) as client:
+            resp = watch_until(
+                client, "/api/chat/watch", {"model": "gemini-pro", "revision": "0"}
+            )
+            assert resp.status_code == 200
+            assert resp.text.strip() == (
+                "[USER] Quem foi Besouro Mangangá?\n"
+                "[ASSISTANT] Uma lenda da capoeira do recôncavo baiano."
+            )
+            assert resp.headers.get("X-Capoeira-Revision") == "1"
+    finally:
+        thread.join(timeout=10)
+
+
+def test_chat_watch_revision_filters_old_events(app):
+    update = {
+        "revision": 3,
+        "transcript": TRANSCRIPT,
+        "messages": TRANSCRIPT,
+    }
+    thread, ctx = start_fake_bridge("gemini", "x", chat_updates=[update])
+    try:
+        with TestClient(app) as client:
+            resp = watch_until(
+                client,
+                "/api/chat/watch",
+                {"model": "gemini-pro", "revision": "3"},
+                timeout=2.0,
+            )
+            assert resp.status_code == 200
+            assert resp.text.strip() == ""
+    finally:
+        thread.join(timeout=10)
+
+
+def test_chat_watch_timeout_returns_empty(app):
+    thread, ctx = start_fake_bridge("gemini", "x")
+    try:
+        with TestClient(app) as client:
+            resp = watch_until(
+                client,
+                "/api/chat/watch",
+                {"model": "gemini-pro", "revision": "0", "timeout": "0.5"},
+                timeout=2.0,
+            )
+            assert resp.status_code == 200
+            assert resp.text.strip() == ""
+    finally:
+        thread.join(timeout=10)
+
+
+def test_chat_watch_rejects_bad_revision(app):
+    thread, ctx = start_fake_bridge("gemini", "x")
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client, "/api/chat/watch", {"model": "gemini-pro", "revision": "abc"}
+            )
+            assert resp.status_code == 400
+    finally:
+        thread.join(timeout=10)
+
+
+def test_chat_watch_offline_503(app):
+    with TestClient(app) as client:
+        resp = client.post("/api/chat/watch", data={"model": "gemini-pro"})
+        assert resp.status_code == 503
+
+
+def test_chat_watch_no_transcript_support_501(app):
+    thread, ctx = start_fake_bridge("gemini", "x", supports_transcript=False)
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client, "/api/chat/watch", {"model": "gemini-pro", "revision": "0"}
+            )
+            assert resp.status_code == 501
+            assert "transcript" in resp.text
     finally:
         thread.join(timeout=10)
 

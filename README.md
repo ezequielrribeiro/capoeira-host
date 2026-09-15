@@ -122,6 +122,12 @@ python smoke_test.py --model claude-sonnet --stream
 
 # Reutilizar o mesmo chat na aba Web (não cria um chat novo)
 python smoke_test.py --endpoint chat --prompt "Continua neste chat?" --new-chat false
+
+# Ler o chat ativo (transcript atual da aba)
+python smoke_test.py --endpoint read
+
+# Gatilho: espera até 20s por uma mensagem nova no chat e devolve o delta
+python smoke_test.py --endpoint watch --revision 3 --timeout 20
 ```
 
 O script imprime a **solicitação** (`chave=valor`) enviada e o **retorno** do
@@ -175,6 +181,7 @@ print(r.text)
 | `CAPOEIRA_TIMEOUT` | `180` | Timeout (s) por requisição antes de `504` |
 | `CAPOEIRA_QUEUE` | `10` | Máximo de requisições enfileiradas por provedor |
 | `CAPOEIRA_NEW_CHAT` | `true` | Iniciar um chat novo na aba Web a cada requisição. Pode ser sobrescrito por requisição via `new_chat` no form de `/api/generate` e `/api/chat` |
+| `CAPOEIRA_WATCH_TIMEOUT` | `30` | Tempo máximo (s) que `POST /api/chat/watch` bloqueia antes de retornar vazio |
 
 Exemplo:
 
@@ -221,6 +228,8 @@ Todas as respostas são `text/plain`. Requests POST usam
 | GET | `/api/ps` | Estado dos providers online: `gemini-pro | provider=gemini | status=idle` |
 | POST | `/api/generate` | Geração a partir de `prompt` (stream ou não) |
 | POST | `/api/chat` | Conversa a partir de `role`/`content` repetidos (stream ou não) |
+| POST | `/api/chat/read` | Lê o transcript do chat ativo na aba Web (`[USER]`/`[ASSISTANT]`) |
+| POST | `/api/chat/watch` | **Long-poll**: bloqueia até aparecer mensagem nova no chat e devolve o delta |
 | POST | `/api/show` | Detalhes de um perfil (bloco de texto) |
 | POST | `/api/create` | Registra um novo perfil (campos `model`, `from`, `system`, `template`, `parameter.<chave>`) |
 | POST | `/api/copy` | Copia um perfil (`source`, `destination`) |
@@ -258,6 +267,47 @@ Resposta: `text/plain` com a resposta do assistente.
 > (`[SYSTEM]`/`[OPTIONS]`/`[TOOLS]`); nas iterações seguintes a extensão injeta só o
 > transcript (prompt), sem repetir esses headers. Iniciar um novo chat
 > (`new_chat=true`) reemite os headers.
+
+#### `POST /api/chat/read` — ler o chat ativo
+
+Lê o transcript atual da aba Web autenticada (reaproveita a sessão do navegador),
+útil para detectar mudanças sem depender de histórico local. Campos: `model`*.
+
+```bash
+curl -d model=gemini-pro http://127.0.0.1:8765/api/chat/read
+```
+
+Resposta (`text/plain`), um turno por linha no mesmo formato de transcript:
+
+```text
+[USER] Quem foi Besouro Mangangá?
+[ASSISTANT] Viveu no fim do século XIX no recôncavo baiano.
+```
+
+A resposta traz o header `X-Capoeira-Revision` com a última `revision` conhecida
+do watcher. Provider offline → `503`; provider sem suporte a transcript → `501`.
+
+#### `POST /api/chat/watch` — gatilho de mudança no chat
+
+**Long-poll**: bloqueia a requisição até **aparecer uma mensagem nova** no chat da
+aba Web (por exemplo, um usuário humano digitando na página) e devolve o delta
+como `text/plain`. Campos: `model`*, `revision` (última vista; default `0`),
+`timeout` (em segundos; default `CAPOEIRA_WATCH_TIMEOUT`, limitado por ele).
+
+```bash
+curl -d model=gemini-pro -d revision=3 --data-urlencode "timeout=20" http://127.0.0.1:8765/api/chat/watch
+```
+
+Sem mudança dentro do `timeout` → `200` com **corpo vazio** (inambiguamente "sem
+update"). Com mudança → `200` com as linhas novas `[USER]`/`[ASSISTANT]` e o
+header `X-Capoeira-Revision` atualizado para o cliente informar na próxima chamada.
+Provider offline → `503`; sem suporte a transcript → `501`.
+
+> A **extensão** monitora o DOM em background e empurra `CHAT_UPDATE` quando o
+> transcript muda. Mudanças causadas pelo **próprio agente** (via `/api/chat` com
+> `new_chat=false`) são silenciadas — o watcher só reage a conteúdo externo
+> (mensagens humanas). Isso é leitura de DOM local: **nenhuma** requisição extra é
+> enviada ao LLM Web.
 
 ### Tool calling simulado (contrato textual)
 
@@ -346,7 +396,9 @@ python -m pytest tests/ -v
 Os testes cobrem: `GET /api/version`, `GET /api/tags`, erro `503` com provider
 offline, um fluxo ponta a ponta de `/api/chat` (o bridge recebe `SEND_PROMPT` e
 a resposta simulada volta ao cliente), o streaming de texto puro via
-`STREAM_UPDATE` + `RESPONSE`, e o tool calling simulado no contrato textual.
+`STREAM_UPDATE` + `RESPONSE`, o tool calling simulado no contrato textual, e —
+com a extensão fake — `/api/chat/read` (reply ao `READ_CHAT`) e `/api/chat/watch`
+(recebimento de `CHAT_UPDATE` com delta, filtro por `revision` e timeout).
 
 ## Estrutura
 
@@ -360,6 +412,7 @@ capoeira-host/
 │   ├── http_api.py       # rotas (form-urlencoded + text/plain)
 │   ├── bridge.py         # WS server 8766
 │   ├── gateway.py        # request → SEND_PROMPT → texto
+│   ├── watcher.py        # ingest de CHAT_UPDATE / estado do chat por provider
 │   ├── queue.py          # fila FIFO por provider
 │   ├── prompt_builder.py # envelope de sistema/transcript/contrato textual
 │   └── errors.py         # erros text/plain

@@ -3,6 +3,12 @@ window.registerAdapter({
   match: () => window.location.hostname.includes("chatgpt.com"),
   supportsStreaming: false,
   supportsNewChat: true,
+  supportsTranscript: true,
+
+  transcriptSelectors: {
+    user: 'div[data-message-author-role="user"]',
+    assistant: 'div[data-message-author-role="assistant"]'
+  },
 
   getSelectors: () => ({
     inputArea: "textarea#prompt-textarea, div[contenteditable='true']",

@@ -24,3 +24,4 @@ class Settings:
     timeout: float = field(default_factory=lambda: float(_env("CAPOEIRA_TIMEOUT", "180")))
     queue_size: int = field(default_factory=lambda: int(_env("CAPOEIRA_QUEUE", "10")))
     new_chat: bool = field(default_factory=lambda: _env_bool("CAPOEIRA_NEW_CHAT", True))
+    watch_timeout: float = field(default_factory=lambda: float(_env("CAPOEIRA_WATCH_TIMEOUT", "30")))

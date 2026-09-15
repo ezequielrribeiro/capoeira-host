@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+import uuid
 from typing import AsyncGenerator
 
-from .errors import BridgeError, BridgeTimeout
+from .errors import BridgeError, BridgeOffline, BridgeTimeout, UnsupportedError
 from .ollama_dto import ChatRequest, GenerateRequest
 from .prompt_builder import apply_template, build_chat_transcript, build_prompt_payload, build_system_envelope
 from .queue import RequestScheduler
@@ -116,3 +117,29 @@ class Gateway:
         async for piece in self.chat_text(profile, req, deadline, new_chat=new_chat):
             chunks.append(piece)
         return "".join(chunks)
+
+    # ------------------------------------------------------------------ read chat
+
+    async def read_chat(self, profile: Profile, deadline: float) -> list[dict]:
+        """Busca o transcript atual da aba Web (READ_CHAT no bridge).
+
+        Fica fora da fila FIFO de geração: é uma leitura pontual do DOM."""
+        session = self._scheduler.bridge.get_session(profile.provider)
+        if session is None:
+            raise BridgeOffline(f"no bridge available for provider '{profile.provider}'")
+        if not session.supports_transcript:
+            raise UnsupportedError(f"no transcript support for provider '{profile.provider}'")
+
+        request_id = str(uuid.uuid4())
+        pending = await self._scheduler.bridge.read_chat(
+            request_id, session, {"provider": profile.provider}
+        )
+        try:
+            result = await asyncio.wait_for(
+                pending.done, timeout=max(0.0, deadline - time.monotonic())
+            )
+        except asyncio.TimeoutError:
+            self._scheduler.bridge.pending.pop(request_id, None)
+            session.pending_ids.discard(request_id)
+            raise BridgeTimeout("bridge timeout after the configured window") from None
+        return (result or {}).get("transcript") or []

@@ -8,10 +8,22 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from .errors import BadRequest, BridgeOffline, UnsupportedError
 from .gateway import Gateway
 from .ollama_dto import VERSION, ChatMessage, ChatRequest, GenerateRequest
-from .prompt_builder import PROVIDERS
+from .prompt_builder import PROVIDERS, build_chat_transcript
 from .registry import Profile
 
 ALLOWED_CHAT_ROLES = ("user", "assistant", "system", "tool")
+
+
+def _transcript_to_messages(transcript: list[dict]) -> list[ChatMessage]:
+    """Converte o transcript da Web (lista de role/content) em ChatMessage."""
+    messages: list[ChatMessage] = []
+    for item in transcript:
+        role = (item.get("role") or "").strip() or "user"
+        content = (item.get("content") or "").strip()
+        if not content:
+            continue
+        messages.append(ChatMessage(role=role, content=content))
+    return messages
 
 
 def _bool(value: str | None, default: bool = False) -> bool:
@@ -38,6 +50,13 @@ def _parse_options(form) -> dict:
 def _require_online(bridge, provider: str) -> None:
     if not bridge.is_online(provider):
         raise BridgeOffline(f"no bridge available for provider '{provider}'")
+
+
+def _set_revision_header(request: Request, profile: Profile, response: PlainTextResponse) -> None:
+    watcher = request.app.state.watcher
+    state = watcher.latest(profile.provider)
+    if state is not None:
+        response.headers["X-Capoeira-Revision"] = str(state.revision)
 
 
 def _parse_messages(form) -> list[ChatMessage]:
@@ -174,7 +193,64 @@ def build_router() -> APIRouter:
             )
         return PlainTextResponse(await gateway.chat(profile, req, deadline, new_chat=new_chat))
 
-    # ------------------------------------------------------------------ show
+    # ------------------------------------------------------------------ read chat
+
+    @router.post("/api/chat/read")
+    async def chat_read(request: Request) -> PlainTextResponse:
+        form = await request.form()
+        model = (form.get("model") or "").strip()
+        if not model:
+            raise BadRequest("campo 'model' é obrigatório")
+
+        gateway: Gateway = request.app.state.gateway
+        settings = request.app.state.settings
+        profile: Profile = request.app.state.registry.require(model)
+
+        deadline = time.monotonic() + settings.timeout
+        transcript = await gateway.read_chat(profile, deadline)
+        body = build_chat_transcript(_transcript_to_messages(transcript))
+
+        response = PlainTextResponse(body)
+        _set_revision_header(request, profile, response)
+        return response
+
+    # ------------------------------------------------------------------ watch chat
+
+    @router.post("/api/chat/watch")
+    async def chat_watch(request: Request) -> PlainTextResponse:
+        form = await request.form()
+        model = (form.get("model") or "").strip()
+        if not model:
+            raise BadRequest("campo 'model' é obrigatório")
+
+        registry = request.app.state.registry
+        bridge = request.app.state.bridge
+        watcher = request.app.state.watcher
+        settings = request.app.state.settings
+        profile: Profile = registry.require(model)
+        _require_online(bridge, profile.provider)
+        session = bridge.get_session(profile.provider)
+        if session is not None and not session.supports_transcript:
+            raise UnsupportedError(f"no transcript support for provider '{profile.provider}'")
+
+        try:
+            revision = int((form.get("revision") or "0").strip())
+        except ValueError:
+            raise BadRequest("campo 'revision' deve ser um inteiro")
+        try:
+            timeout = float(form.get("timeout") or str(settings.watch_timeout))
+        except ValueError:
+            raise BadRequest("campo 'timeout' deve ser um número")
+        timeout = max(0.0, min(timeout, settings.watch_timeout))
+
+        events = await watcher.wait_events(profile.provider, revision, timeout)
+        lines: list[str] = []
+        for event in events:
+            lines.extend(build_chat_transcript(_transcript_to_messages(event.messages)).splitlines())
+
+        response = PlainTextResponse("\n".join(lines))
+        _set_revision_header(request, profile, response)
+        return response
 
     @router.post("/api/show")
     async def show(request: Request) -> PlainTextResponse:

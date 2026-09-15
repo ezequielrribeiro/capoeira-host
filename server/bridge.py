@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from typing import Awaitable, Callable
 
 import websockets
 
@@ -53,13 +54,24 @@ class BridgeSession:
     def supports_new_chat(self) -> bool:
         return bool(self.capabilities.get("supportsNewChat"))
 
+    @property
+    def supports_transcript(self) -> bool:
+        return bool(self.capabilities.get("supportsTranscript"))
+
 
 class BridgeServer:
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        on_chat_update: Callable[[str, dict], Awaitable[None]] | None = None,
+    ) -> None:
         self.host = host
         self.port = port
         self.sessions: dict[str, BridgeSession] = {}
         self.pending: dict[str, PendingRequest] = {}
+        self._sock_to_provider: dict[object, str] = {}
+        self._on_chat_update = on_chat_update
         self._server = None
 
     async def start(self) -> None:
@@ -83,9 +95,15 @@ class BridgeServer:
         return provider in self.sessions
 
     async def send_prompt(self, request_id: str, session: BridgeSession, payload: dict) -> PendingRequest:
+        return await self._send_action("SEND_PROMPT", request_id, session, payload)
+
+    async def read_chat(self, request_id: str, session: BridgeSession, payload: dict) -> PendingRequest:
+        return await self._send_action("READ_CHAT", request_id, session, payload)
+
+    async def _send_action(self, action: str, request_id: str, session: BridgeSession, payload: dict) -> PendingRequest:
         message = {
             "version": "1.0",
-            "action": "SEND_PROMPT",
+            "action": action,
             "id": request_id,
             "payload": payload,
         }
@@ -97,7 +115,7 @@ class BridgeServer:
         except Exception as exc:
             session.pending_ids.discard(request_id)
             self.pending.pop(request_id, None)
-            raise BridgeError(f"failed to send prompt: {exc}") from exc
+            raise BridgeError(f"failed to send {action}: {exc}") from exc
         return pending
 
     async def _handler(self, websocket) -> None:
@@ -110,6 +128,8 @@ class BridgeServer:
                 action = msg.get("action")
                 if action == "HELLO":
                     self._register(websocket, msg.get("payload") or {})
+                elif action == "CHAT_UPDATE":
+                    await self._dispatch_chat_update(websocket, msg)
                 elif action in ("RESPONSE", "STREAM_UPDATE", "ERROR"):
                     self._dispatch(msg)
         finally:
@@ -121,11 +141,20 @@ class BridgeServer:
             return
         payload.setdefault("supportsStreaming", False)
         payload.setdefault("supportsNewChat", True)
+        payload.setdefault("supportsTranscript", False)
         old = self.sessions.get(provider)
         if old is not None and old.websocket is not websocket:
             self.sessions.pop(provider, None)
+            self._sock_to_provider.pop(old.websocket, None)
             self._fail_pending(old, BridgeError(f"bridge session replaced (provider '{provider}')"))
         self.sessions[provider] = BridgeSession(websocket, provider, payload)
+        self._sock_to_provider[websocket] = provider
+
+    async def _dispatch_chat_update(self, websocket, msg: dict) -> None:
+        provider = self._sock_to_provider.get(websocket) or (msg.get("payload") or {}).get("provider")
+        if not provider or self._on_chat_update is None:
+            return
+        await self._on_chat_update(provider, msg.get("payload") or {})
 
     def _dispatch(self, msg: dict) -> None:
         request_id = msg.get("id")
@@ -163,4 +192,5 @@ class BridgeServer:
         for provider, session in list(self.sessions.items()):
             if session.websocket is websocket:
                 self.sessions.pop(provider, None)
+                self._sock_to_provider.pop(websocket, None)
                 self._fail_pending(session, BridgeError(f"bridge disconnected (provider '{provider}')"))

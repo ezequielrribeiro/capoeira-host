@@ -1,10 +1,12 @@
 # CapoeiraHost — Gateway Local ⇄ LLM Web via Browser Bridge
 
 **Projeto:** CapoeiraHost
-**Versão:** `2.0.0`
+**Versão:** `2.1.0`
 **Status:** `Approved`
 **Data:** 12 de Setembro de 2026
-**Revisão:** 2.0 — comunicação **textual** (sem JSON) entre agente/ferramenta local, gateway e LLM via interface Web.
+**Revisão:** 2.1 — adiciona leitura do chat ativo (`/api/chat/read`) e gatilho de
+mudanças via long-poll (`/api/chat/watch`) alimentados por um watcher de DOM na
+extensão (`CHAT_UPDATE`).
 
 ---
 
@@ -110,6 +112,8 @@ JSON** na comunicação — que as UIs Web costumam corromper.
 | `stream=true` | Streaming de texto puro (replay final em chunks OU `STREAM_UPDATE` incremental se o adaptador suportar) |
 | `options` | Traduzidos em instruções injetadas no envelope de system prompt (`[OPTIONS]`) |
 | Tool calling | **Simulado** via contrato textual `[TOOL_CALL] nome | chave=valor` (sem JSON) |
+| `/api/chat/read` | Lê o transcript atual do chat ativo na aba Web (turnos `[USER]`/`[ASSISTANT]`) |
+| `/api/chat/watch` | Gatilho de mudança: long-poll que devolve o delta quando uma mensagem nova aparece |
 
 ---
 
@@ -124,6 +128,7 @@ JSON** na comunicação — que as UIs Web costumam corromper.
 | `CAPOEIRA_TIMEOUT` | `180` | Timeout (s) por requisição antes de `504` |
 | `CAPOEIRA_QUEUE` | `10` | Máximo de requisições enfileiradas por provedor |
 | `CAPOEIRA_NEW_CHAT` | `true` | Inicia um chat novo na aba Web a cada requisição (padrão). Pode ser sobrescrito via `new_chat` no form de `/api/generate` e `/api/chat` |
+| `CAPOEIRA_WATCH_TIMEOUT` | `30` | Tempo máximo (s) que `POST /api/chat/watch` bloqueia antes de retornar vazio |
 
 ---
 
@@ -256,7 +261,45 @@ O agente executa a ferramenta e continua o ciclo enviando `role=tool` (+
 role=tool · content=Leite comprado · tool_call_id=call-1
 ```
 
-### 5.6. `POST /api/show`
+### 5.6. `POST /api/chat/read` — ler o chat ativo
+
+Campo: `model`*. Delega um `READ_CHAT` para a extensão e devolve o transcript
+atual da aba Web autenticada, um turno por linha no contrato textual:
+`[USER]`/`[ASSISTANT]`. Provider offline → `503`; sem `supportsTranscript` → `501`.
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/chat/read -d model=gemini-pro
+```
+
+```text
+[USER] Quem foi Besouro Mangangá?
+[ASSISTANT] Viveu no fim do século XIX no recôncavo baiano.
+```
+
+Resposta inclui header `X-Capoeira-Revision` com a última revision conhecida do watcher.
+
+### 5.7. `POST /api/chat/watch` — gatilho de mudança (long-poll)
+
+Campos: `model`*, `revision` (última revision vista; default `0`), `timeout`
+(segundos; default `CAPOEIRA_WATCH_TIMEOUT`, limitado por ele).
+
+Bloqueia até a extensão reportar um `CHAT_UPDATE` com `revision` maior que a
+informada (mensagem humana nova na aba Web) e devolve **somente o delta** como
+`text/plain` (`[USER]`/`[ASSISTANT]`), além do header `X-Capoeira-Revision`
+atualizado. Sem mudança dentro do `timeout` → `200` com **corpo vazio**.
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/chat/watch \
+  -d model=gemini-pro -d revision=3 -d timeout=20
+```
+
+> Mudanças **causadas pelo próprio agente** via `/api/chat` com `new_chat=false`
+> são silenciadas: enquanto o `SEND_PROMPT` está em andamento, o watcher apenas
+> ressincroniza o baseline (não emite `CHAT_UPDATE`), então não há eco da própria
+> resposta do agente. A detecção é leitura de DOM local — **nenhuma** requisição
+> extra é enviada ao LLM Web.
+
+### 5.8. `POST /api/show`
 
 Campo: `model`. Retorna bloco `text/plain`:
 
@@ -271,19 +314,19 @@ template: [INST] {{ .System }} [/INST]
 options: temperature=0.7; num_predict=2048
 ```
 
-### 5.7. `POST /api/create` — registrar perfil
+### 5.9. `POST /api/create` — registrar perfil
 
 Campos: `model`*, `from` (provedor ou perfil base), `system`, `template`,
 `parameter.<chave>` (ex.: `parameter.temperature=0.3`). Retorna `ok`.
 
-### 5.8. `POST /api/copy` e `DELETE /api/delete`
+### 5.10. `POST /api/copy` e `DELETE /api/delete`
 
 - `/api/copy`: campos `source`, `destination`.
 - `/api/delete`: campo `model`.
 
 Ambos retornam `ok`.
 
-### 5.9. Não aplicáveis (modelo não é hospedado)
+### 5.11. Não aplicáveis (modelo não é hospedado)
 
 | Endpoint | Status | Resposta (`text/plain`) |
 |---|---|---|
@@ -317,6 +360,7 @@ Ambos retornam `ok`.
     "adapters": ["gemini"],
     "supportsStreaming": false,
     "supportsNewChat": true,
+    "supportsTranscript": true,
     "tabTitle": "Aba Gemini — Capoeira"
   }
 }
@@ -366,7 +410,45 @@ Ambos retornam `ok`.
 O `STREAM_UPDATE` é capturado pelo `content.js` via **polling** (`setInterval` de
 500ms); o `RESPONSE` final com o texto completo é a fonte da verdade.
 
+**`CHAT_UPDATE`** (watcher de DOM — mudança detectada no chat ativo):
+
+```json
+{
+  "version": "1.0",
+  "action": "CHAT_UPDATE",
+  "id": "watch-uuid-1",
+  "payload": {
+    "provider": "gemini",
+    "revision": 7,
+    "transcript": [
+      { "role": "user", "content": "Quem foi Besouro Mangangá?" },
+      { "role": "assistant", "content": "Viveu no fim do século XIX..." }
+    ],
+    "messages": [{ "role": "user", "content": "Quem foi Besouro Mangangá?" }]
+  }
+}
+```
+
+O `content.js` roda um watcher (`setInterval`) que compara o digest do
+`extractTranscript()` do adaptador; quando muda e **não** há `SEND_PROMPT` do
+próprio agente em andamento, envia `CHAT_UPDATE` com `revision` incremental e o
+**delta** (`messages`). Enquanto o agente gera (`SEND_PROMPT` em flight), o
+watcher apenas ressincroniza o baseline — sem eco. `revision` nunca reseta (é
+monotônico, mesmo em chat novo).
+
 ### 6.2. Servidor → Extensão
+
+**`READ_CHAT`** — pedido on-demand do transcript atual (resposta via `RESPONSE`
+correlacionado por `id`, payload `{ "transcript": [...] }`):
+
+```json
+{
+  "version": "1.0",
+  "action": "READ_CHAT",
+  "id": "read-uuid-1",
+  "payload": { "provider": "gemini" }
+}
+```
 
 **`SEND_PROMPT`** — payload simplificado (o contrato textual vive dentro de
 `systemPrompt`/`prompt`; `conversation`, `options` e `expectFormat` foram removidos):
@@ -414,6 +496,12 @@ via `window.registerAdapter(...)` e selecionados por `match()`.
 
 > ⚠️ `host_permissions` para `ws://127.0.0.1:8766/*` é **obrigatória** no MV3.
 > Adaptadores implementados mas fora da lista do `manifest.json` não são injetados.
+
+Todos os adaptadores carregados declaram `supportsTranscript: true` e
+implementam `extractTranscript()` (via `transcriptSelectors` no base). A
+extração é **best-effort** — os seletores de mensagens de **usuário** são novos
+e mais sujeitos a mudanças no DOM dos provedores (especialmente Gemini e Copilot
+365); utilize-os para validar manualmente em cada página real.
 
 ---
 
@@ -465,7 +553,8 @@ Todos os erros HTTP retornam corpo **`text/plain`** com a mensagem:
 | Timeout de geração na Web | `504` | `bridge timeout after the configured window` |
 | Extensão reportou `ERROR` | `502` | mensagem vinda da extensão |
 | `role=tool` sem `tools` | `400` | `role 'tool' exige o campo 'tools' no request (tool calling simulado)` |
-| `pull`/`push`/`blobs`/`embed` | `501` | ver §5.9 |
+| `pull`/`push`/`blobs`/`embed` | `501` | ver §5.11 |
+| Provider sem `supportsTranscript` | `501` | `no transcript support for provider '...'` |
 
 ---
 
@@ -501,6 +590,7 @@ capoeira-host/
 │   ├── http_api.py           # rotas textuais (form-urlencoded → text/plain)
 │   ├── bridge.py             # WS server 8766, allowlist de Origin, headers PNA, correlação id
 │   ├── gateway.py            # form → SEND_PROMPT → texto → RESPONSE/STREAM_UPDATE
+│   ├── watcher.py            # ChatWatcher: ingest de CHAT_UPDATE, estado por provider, long-poll
 │   ├── queue.py              # FIFO por provider + locks
 │   ├── prompt_builder.py     # envelope de sistema, transcript, contrato textual
 │   └── errors.py             # erros text/plain padronizados
