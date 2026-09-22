@@ -296,8 +296,8 @@ def test_chat_via_fake_extension(app):
 
             assert ctx["received"], "bridge não recebeu SEND_PROMPT"
             payload = ctx["received"][0]["payload"]
-            assert "[SYSTEM]" in payload["systemPrompt"]
-            assert "[USER]" in payload["prompt"]
+            assert payload["systemPrompt"] == "Você é um assistente útil."
+            assert "[USER] O que é capoeira?" in payload["prompt"]
             assert payload["newChat"] is True
     finally:
         thread.join(timeout=10)
@@ -316,7 +316,8 @@ def test_generate_via_fake_extension(app):
             assert resp.text == "Expliquei a capoeira."
             assert ctx["received"], "bridge não recebeu SEND_PROMPT"
             payload = ctx["received"][0]["payload"]
-            assert "[SYSTEM]" in payload["systemPrompt"]
+            assert payload["systemPrompt"] == "Você é um assistente útil."
+            assert "[SYSTEM]" not in payload["systemPrompt"]
             assert payload["newChat"] is True
     finally:
         thread.join(timeout=10)
@@ -523,150 +524,34 @@ def test_generate_new_chat_false_via_request_override(app):
         thread.join(timeout=10)
 
 
-# --------------------------- tool calling simulado (contrato textual) ---------------------------
+# --------------------------- pass-through verbatim (sem tags do host) ---------------------------
 
 
-TOOLS_TEXT = (
-    "name=shopping | desc=Consulta/prepara uma compra. | item:string | quantidade:int"
-)
-
-
-def tool_call_line(name, args_text):
-    return f"[TOOL_CALL] {name} | {args_text}"
-
-
-def test_tool_calling_returns_call_lines(app):
-    """Com 'tools' presente, se a Web devolver a linha de contrato, o host
-    devolve as linhas [TOOL_CALL] como text/plain (prosa removida)."""
-    line_response = "Claro! Vou buscar isso pra você.\n" + tool_call_line(
-        "shopping", "item=leite | quantidade=2"
-    )
-    thread, ctx = start_fake_bridge("gemini", line_response)
+def test_chat_system_verbatim_without_tags(app):
+    """O system prompt vai verbatim, sem [SYSTEM]/[OPTIONS]/[TOOLS]."""
+    thread, ctx = start_fake_bridge("gemini", "Resposta.")
     try:
         with TestClient(app) as client:
             resp = post_until(
                 client,
                 "/api/chat",
-                {
-                    "model": "gemini-pro",
-                    "tools": TOOLS_TEXT,
-                    "role": "user",
-                    "content": "Preciso comprar leite.",
-                },
+                {"model": "gemini-pro", "role": "user", "content": "X"},
             )
             assert resp.status_code == 200
-            assert resp.text == tool_call_line("shopping", "item=leite | quantidade=2")
             assert ctx["received"], "bridge não recebeu SEND_PROMPT"
             system = ctx["received"][0]["payload"]["systemPrompt"]
-            assert "[TOOLS]" in system
-            assert "[TOOL] name=shopping" in system
-            assert "[MODE TOOL_CALLING]" in system
+            assert system == "Você é um assistente útil."
+            assert "[SYSTEM]" not in system
+            assert "[OPTIONS]" not in system
+            assert "[TOOLS]" not in system
+            assert "[MODE TOOL_CALLING]" not in system
     finally:
         thread.join(timeout=10)
 
 
-def test_tool_calling_parallel_calls(app):
-    """Várias linhas [TOOL_CALL] viram chamadas paralelas (uma por linha)."""
-    line_response = (
-        tool_call_line("shopping", "item=leite")
-        + "\n"
-        + tool_call_line("shopping", "item=pão | quantidade=3")
-    )
-    thread, ctx = start_fake_bridge("gemini", line_response)
-    try:
-        with TestClient(app) as client:
-            resp = post_until(
-                client,
-                "/api/chat",
-                {
-                    "model": "gemini-pro",
-                    "tools": TOOLS_TEXT,
-                    "role": "user",
-                    "content": "Compre leite e pão.",
-                },
-            )
-            assert resp.status_code == 200
-            lines = [ln for ln in resp.text.strip().splitlines() if ln]
-            assert len(lines) == 2
-            assert lines[0].endswith("item=leite")
-            assert lines[1].endswith("item=pão | quantidade=3")
-    finally:
-        thread.join(timeout=10)
-
-
-def test_tool_calling_line_inside_code_fence(app):
-    """Linha [TOOL_CALL] envelopada em code fence ainda é parseada — o render
-    markdown arranca os backticks no innerText."""
-    line_response = "```text\n" + tool_call_line("shopping", "item=leite") + "\n```"
-    thread, ctx = start_fake_bridge("gemini", line_response)
-    try:
-        with TestClient(app) as client:
-            resp = post_until(
-                client,
-                "/api/chat",
-                {
-                    "model": "gemini-pro",
-                    "tools": TOOLS_TEXT,
-                    "role": "user",
-                    "content": "Compre leite.",
-                },
-            )
-            assert resp.status_code == 200
-            assert resp.text == tool_call_line("shopping", "item=leite")
-    finally:
-        thread.join(timeout=10)
-
-
-def test_tool_calling_falls_back_to_text(app):
-    """Se a Web responder texto (sem linha [TOOL_CALL]), faz fallback em texto."""
-    thread, ctx = start_fake_bridge("gemini", "Vou verificar para você.")
-    try:
-        with TestClient(app) as client:
-            resp = post_until(
-                client,
-                "/api/chat",
-                {
-                    "model": "gemini-pro",
-                    "tools": TOOLS_TEXT,
-                    "role": "user",
-                    "content": "Compre leite.",
-                },
-            )
-            assert resp.status_code == 200
-            assert resp.text == "Vou verificar para você."
-    finally:
-        thread.join(timeout=10)
-
-
-def test_tool_calling_fallback_strips_invalid_lines(app):
-    """Linha [TOOL_CALL] inválida (sem nome parseável) é removida do fallback."""
-    line_response = (
-        "Nunca vou chamar a ferramenta.\n"
-        + "[TOOL_CALL]  {bad json}\n"
-        + "[TOOL_CALL] shopping {bad json}"
-    )
-    thread, ctx = start_fake_bridge("gemini", line_response)
-    try:
-        with TestClient(app) as client:
-            resp = post_until(
-                client,
-                "/api/chat",
-                {
-                    "model": "gemini-pro",
-                    "tools": TOOLS_TEXT,
-                    "role": "user",
-                    "content": "Compre leite.",
-                },
-            )
-            assert resp.status_code == 200
-            assert resp.text == "Nunca vou chamar a ferramenta."
-    finally:
-        thread.join(timeout=10)
-
-
-def test_tool_result_roundtrip_accepted(app):
-    """Role 'tool' + tools mantêm o resultado no transcript (TOOL_RESULT)."""
-    thread, ctx = start_fake_bridge("gemini", "Você tem 2 leites.")
+def test_chat_transcript_keeps_user_assistant_labels(app):
+    """O transcript mantém [USER]/[ASSISTANT] no prompt enviado à Web."""
+    thread, ctx = start_fake_bridge("gemini", "Resposta.")
     try:
         with TestClient(app) as client:
             resp = post_until(
@@ -674,26 +559,40 @@ def test_tool_result_roundtrip_accepted(app):
                 "/api/chat",
                 [
                     ("model", "gemini-pro"),
-                    ("tools", TOOLS_TEXT),
+                    ("role", "user"),
+                    ("content", "Quem foi Besouro?"),
                     ("role", "assistant"),
-                    ("content", tool_call_line("shopping", "item=leite")),
-                    ("role", "tool"),
-                    ("content", "Leite comprado"),
-                    ("tool_call_id", "call-1"),
+                    ("content", "Uma lenda."),
                 ],
             )
             assert resp.status_code == 200
-            assert resp.text == "Você tem 2 leites."
             assert ctx["received"]
             prompt = ctx["received"][0]["payload"]["prompt"]
-            assert "[TOOL_RESULT] (call-1)" in prompt
-            assert "[TOOL_CALL] shopping | item=leite" in prompt
+            assert "[USER] Quem foi Besouro?" in prompt
+            assert "[ASSISTANT] Uma lenda." in prompt
     finally:
         thread.join(timeout=10)
 
 
-def test_role_tool_rejected_without_tools(app):
-    """Sem 'tools' no request, role 'tool' continua rejeitado (400)."""
+def test_response_verbatim_no_tool_parsing(app):
+    """A resposta é devolvida verbatim, sem extração/strip de [TOOL_CALL]."""
+    line_response = "Vou buscar isso.\n[TOOL_CALL] shopping | item=leite"
+    thread, ctx = start_fake_bridge("gemini", line_response)
+    try:
+        with TestClient(app) as client:
+            resp = post_until(
+                client,
+                "/api/chat",
+                {"model": "gemini-pro", "role": "user", "content": "Compre leite."},
+            )
+            assert resp.status_code == 200
+            assert resp.text == line_response
+    finally:
+        thread.join(timeout=10)
+
+
+def test_role_tool_rejected(app):
+    """role 'tool' deixou de ser suportado (tool calling removido do host)."""
     with TestClient(app) as client:
         resp = client.post(
             "/api/chat",
@@ -701,11 +600,10 @@ def test_role_tool_rejected_without_tools(app):
                 "model": "gemini-pro",
                 "role": "tool",
                 "content": "ok",
-                "tool_call_id": "call-1",
             },
         )
         assert resp.status_code == 400
-        assert "tools" in resp.text
+        assert "messages" in resp.text
 
 
 def test_unknown_role_rejected(app):
@@ -719,10 +617,14 @@ def test_unknown_role_rejected(app):
         assert "messages" in resp.text
 
 
-def test_tool_calling_streaming_emits_calls(app):
-    """Em streaming com tools, as chamadas aparecem no texto final."""
-    line_response = tool_call_line("shopping", "item=leite")
-    thread, ctx = start_fake_bridge("gemini", line_response)
+def test_chat_streaming_verbatim(app):
+    """Em streaming sem tools, o texto chega verbatim pelos chunks."""
+    thread, ctx = start_fake_bridge(
+        "gemini",
+        "A capoeira é uma arte.",
+        streaming=True,
+        partials=["A capoeira ", "é uma arte."],
+    )
     try:
         with TestClient(app) as client:
             resp = post_until(
@@ -731,13 +633,13 @@ def test_tool_calling_streaming_emits_calls(app):
                 {
                     "model": "gemini-pro",
                     "stream": "true",
-                    "tools": TOOLS_TEXT,
                     "role": "user",
-                    "content": "Compre leite.",
+                    "content": "O que é capoeira?",
                 },
             )
             assert resp.status_code == 200
-            assert resp.text == tool_call_line("shopping", "item=leite")
+            assert resp.text == "A capoeira é uma arte."
+            assert ctx["received"], "bridge não recebeu SEND_PROMPT"
     finally:
         thread.join(timeout=10)
 

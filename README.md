@@ -33,8 +33,15 @@ alternativo de texto puro**, buscando robustez diante dessa variabilidade.
 > **⚠️ Mudança de protocolo:** a API **não é mais compatível com a API Ollama**.
 > Requisições usam `application/x-www-form-urlencoded` (`chave=valor`) e respostas
 > são `text/plain`. Isso foi decidido porque a interface Web nem sempre reproduz
-> JSON corretamente — então todo o fio do host até o LLM Web usa um **contrato de
-> texto puro** (tags `[TOOL_CALL]`, `[TOOL_RESULT]`, etc.), sem JSON embutido.
+> JSON corretamente — então todo o fio do host até o LLM Web usa **texto puro**,
+> sem JSON embutido.
+>
+> **Pass-through verbatim:** o CapoeiraHost **não encapsula** as instruções que
+> recebe. O `system` e o `prompt` são repassados à Web exatamente como enviados —
+> a formatação/encapsulamento (tags, instruções de ferramentas, contratos) é
+> responsabilidade **exclusiva** da ferramenta que consome o CapoeiraHost. O
+> transcript em `/api/chat` mantém os rótulos `[USER]`/`[ASSISTANT]` para
+> distinguir turnos.
 
 O JSON permanece apenas em `models.json` (configuração do registry) e no WebSocket
 bridge (`host ⇄ extensão`, que são código nosso e não sofrem a ação da UI Web).
@@ -250,7 +257,6 @@ curl -d model=gemini-pro --data-urlencode "prompt=Explique o que é capoeira em 
 #### `POST /api/chat`
 
 Campos: `model`*, e pares repetidos `role`/`content` (na ordem da conversa),
-`tool_call_id` (para `role=tool`), `tools` (contrato textual, ver abaixo),
 `stream`, `new_chat`, `option.<chave>`.
 
 ```bash
@@ -263,10 +269,9 @@ Resposta: `text/plain` com a resposta do assistente.
 > do provedor (`newChat: true`). Para continuar a mesma conversa (menos "pisca" e
 > contexto real na Web), defina `CAPOEIRA_NEW_CHAT=false` (global) ou envie
 > `new_chat=false` no form (por requisição; o valor por requisição tem precedência).
-> Nesse modo, apenas a **primeira interação da sessão** emite os headers do system
-> (`[SYSTEM]`/`[OPTIONS]`/`[TOOLS]`); nas iterações seguintes a extensão injeta só o
-> transcript (prompt), sem repetir esses headers. Iniciar um novo chat
-> (`new_chat=true`) reemite os headers.
+> Nesse modo, apenas a **primeira interação da sessão** emite o system prompt; nas
+> iterações seguintes a extensão injeta só o transcript (prompt), sem repetir o
+> system. Iniciar um novo chat (`new_chat=true`) reemite o system.
 
 #### `POST /api/chat/read` — ler o chat ativo
 
@@ -309,47 +314,13 @@ Provider offline → `503`; sem suporte a transcript → `501`.
 > (mensagens humanas). Isso é leitura de DOM local: **nenhuma** requisição extra é
 > enviada ao LLM Web.
 
-### Tool calling simulado (contrato textual)
+### Tool calling
 
-A UI Web dos provedores **não executa function calling nativo**. O CapoeiraHost
-ativa um **tool calling simulado** quando `/api/chat` recebe o campo `tools` com
-definições no formato textual (`chave=valor`, um tool por linha):
-
-```
-name=shopping | desc=Consulta/prepara uma compra. | item:string | quantidade:int
-```
-
-Esse texto é injetado no envelope de system prompt como `[TOOL] ...` e o modelo é
-orientado a responder com **uma linha de texto puro** por chamada:
-
-```
-[TOOL_CALL] shopping | item=leite | quantidade=2
-```
-
-Valores: números/booleans vão direto (`2`, `true`), strings com espaço usam aspas
-simples (`'valor com espaço'`); várias linhas `[TOOL_CALL]` viram chamadas
-paralelas.
-
-- O host devolve as linhas `[TOOL_CALL]` (prosa removida) como `text/plain`.
-- **Fallback:** se a Web responder texto (sem linha válida), o host devolve a prosa
-  (com as linhas `[TOOL_CALL]` removidas) — nunca quebra a conversa.
-- O agente executa a ferramenta e continua o ciclo mandando `role=tool` (+
-  `tool_call_id`) com o resultado; sem o campo `tools`, o `role=tool` retorna `400`.
-
-```python
-import requests
-
-r = requests.post(
-    "http://127.0.0.1:8765/api/chat",
-    data={
-        "model": "gemini-pro",
-        "tools": "name=shopping | desc=Consulta/prepara uma compra. | item:string | quantidade:int",
-        "role": "user",
-        "content": "Preciso comprar leite.",
-    },
-)
-print(r.text)  # [TOOL_CALL] shopping | item=leite | quantidade=2
-```
+O CapoeiraHost é **pass-through**: não injeta definições de ferramentas nem faz
+parse de chamadas. Se a ferramenta que consome o host quiser tool calling, ela
+formata a instrução no próprio `system`/`prompt` e interpreta a resposta verbatim
+como preferir. O `role=tool` e o campo `tools` não são mais suportados na API
+(`role` indefinido → `400`).
 
 ### Não aplicáveis (modelo não é hospedado)
 
@@ -364,7 +335,7 @@ Erros retornam **`text/plain`** com a mensagem e os códigos HTTP:
 
 | Código | Situação típica |
 |---|---|
-| `400` | Campo obrigatório ausente, `role` inválido, ou `role=tool` sem `tools` |
+| `400` | Campo obrigatório ausente ou `role` inválido |
 | `404` | Modelo não registrado |
 | `502` | Falha reportada pela extensão durante a geração |
 | `503` | Provider sem bridge conectado / fila cheia |
@@ -396,9 +367,10 @@ python -m pytest tests/ -v
 Os testes cobrem: `GET /api/version`, `GET /api/tags`, erro `503` com provider
 offline, um fluxo ponta a ponta de `/api/chat` (o bridge recebe `SEND_PROMPT` e
 a resposta simulada volta ao cliente), o streaming de texto puro via
-`STREAM_UPDATE` + `RESPONSE`, o tool calling simulado no contrato textual, e —
-com a extensão fake — `/api/chat/read` (reply ao `READ_CHAT`) e `/api/chat/watch`
-(recebimento de `CHAT_UPDATE` com delta, filtro por `revision` e timeout).
+`STREAM_UPDATE` + `RESPONSE`, o pass-through verbatim (system sem tags e resposta
+sem parse de `[TOOL_CALL]`), e — com a extensão fake — `/api/chat/read` (reply ao
+`READ_CHAT`) e `/api/chat/watch` (recebimento de `CHAT_UPDATE` com delta, filtro
+por `revision` e timeout).
 
 ## Estrutura
 
@@ -414,7 +386,7 @@ capoeira-host/
 │   ├── gateway.py        # request → SEND_PROMPT → texto
 │   ├── watcher.py        # ingest de CHAT_UPDATE / estado do chat por provider
 │   ├── queue.py          # fila FIFO por provider
-│   ├── prompt_builder.py # envelope de sistema/transcript/contrato textual
+│   ├── prompt_builder.py # system verbatim, transcript, template
 │   └── errors.py         # erros text/plain
 ├── extension/            # extensão Chrome MV3
 │   ├── manifest.json

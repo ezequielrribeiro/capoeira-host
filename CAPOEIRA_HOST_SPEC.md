@@ -31,8 +31,12 @@ robusto diante dessa característica — mantendo JSON apenas onde o fio é noss
 
 A interface Web dos LLMs **nem sempre reproduz JSON corretamente** (adiciona code
 fences, escapa aspas, quebra linha, etc.). Por isso **todo o fio** agente/ferramenta
-local → gateway → LLM Web usa um **contrato de texto puro** (`chave=valor` com
-separador `|` e tags de linha única como `[TOOL_CALL]`, `[TOOL_RESULT]`):
+local → gateway → LLM Web usa **texto puro**: o CapoeiraHost é **pass-through**
+verbatim e **não encapsula** o que recebe com tags próprias (`[SYSTEM]`,
+`[OPTIONS]`, `[TOOLS]`, contrato `[TOOL_CALL]`, etc.). A formatação e o
+encapsulamento do texto são responsabilidade **exclusiva** da ferramenta que
+consome o host. O transcript de `/api/chat` mantém apenas os rótulos
+`[USER]`/`[ASSISTANT]` para distinguir turnos.
 
 - A **API HTTP** não é mais compatível com o Ollama: os POSTs usam
   `application/x-www-form-urlencoded` e as respostas são `text/plain`.
@@ -110,8 +114,8 @@ JSON** na comunicação — que as UIs Web costumam corromper.
 | `/api/generate` | Prompt único enviado à Web (transcript simples) |
 | `/api/chat` | Conversa serializada como transcript textual e enviada como 1 prompt (novo chat por requisição; opcionalmente reutiliza via `new_chat=false`) |
 | `stream=true` | Streaming de texto puro (replay final em chunks OU `STREAM_UPDATE` incremental se o adaptador suportar) |
-| `options` | Traduzidos em instruções injetadas no envelope de system prompt (`[OPTIONS]`) |
-| Tool calling | **Simulado** via contrato textual `[TOOL_CALL] nome | chave=valor` (sem JSON) |
+| `options` | Aceitos no form, mas **ignorados** no prompt (o host não injeta mais `[OPTIONS]`; parâmetros de amostragem não são aplicáveis à Web) |
+| Tool calling | Fora de escopo do host: **pass-through verbatim** — a ferramenta formata a instrução e interpreta a resposta por conta própria |
 | `/api/chat/read` | Lê o transcript atual do chat ativo na aba Web (turnos `[USER]`/`[ASSISTANT]`) |
 | `/api/chat/watch` | Gatilho de mudança: long-poll que devolve o delta quando uma mensagem nova aparece |
 
@@ -212,8 +216,7 @@ sem NDJSON e sem meta-dados.
 
 ### 5.5. `POST /api/chat`
 
-Campos de form: `model`*, pares repetidos `role`/`content`, `tool_call_id` (para
-`role=tool`), `tools` (contrato textual de tool calling), `stream`, `new_chat`,
+Campos de form: `model`*, pares repetidos `role`/`content`, `stream`, `new_chat`,
 `option.<chave>`.
 
 ```bash
@@ -230,41 +233,18 @@ Resposta (não-stream):
 Viveu no fim do século XIX no recôncavo baiano, tornando-se uma das maiores lendas da capoeira.
 ```
 
-> **Tool calling simulado (contrato textual):** quando o request traz `tools`, o
-> gateway lista as definições no envelope de system prompt como **linhas únicas**
-> (`[TOOL] chave=valor`, uma por ferramenta) e instrui o modelo Web a emitir **uma
-> linha de texto puro por chamada** no formato `[TOOL_CALL] nome | chave=valor` —
-> sem blocos de código e sem JSON. O gateway faz **scan por regex** em todo o texto
-> (tolerante a prosa ao redor e a code fences), valida as linhas e devolve-as como
-> `text/plain` (prosa removida). Múltiplas linhas viram chamadas paralelas. Se não
-> houver linha válida, faz **fallback** devolvendo o texto (com as linhas
-> `[TOOL_CALL]` removidas).
->
-> **Sem `tools` no request**: `role=tool` → `400 Bad Request`.
-
-Campos do request (`tools`, definições de ferramenta — **sem JSON**, um tool por linha):
-
-```text
-tools=name=shopping | desc=Consulta/prepara uma compra. | item:string | quantidade:int
-```
-
-Exemplo de resposta do modelo Web com tool call (1 linha por chamada; prosa opcional antes/depois):
-
-```text
-[TOOL_CALL] shopping | item=leite | quantidade=2
-```
-
-O agente executa a ferramenta e continua o ciclo enviando `role=tool` (+
-`tool_call_id`) com o resultado:
-
-```text
-role=tool · content=Leite comprado · tool_call_id=call-1
-```
+> **Pass-through verbatim:** o CapoeiraHost não adiciona tags próprias ao que
+> recebe. O system prompt do perfil segue **verbatim** (sem `[SYSTEM]`,
+> `[OPTIONS]`, `[TOOLS]`). As mensagens são serializadas no transcript apenas com
+> os rótulos `[USER]`/`[ASSISTANT]` (role `system` entra como conteúdo puro), e a
+> resposta da Web é devolvida **verbatim**, sem qualquer parse. Qualquer
+> formatação/contrato é responsabilidade exclusiva da ferramenta que consome o
+> host. `role` fora de `user|assistant|system` → `400`.
 
 ### 5.6. `POST /api/chat/read` — ler o chat ativo
 
 Campo: `model`*. Delega um `READ_CHAT` para a extensão e devolve o transcript
-atual da aba Web autenticada, um turno por linha no contrato textual:
+atual da aba Web autenticada, um turno por linha:
 `[USER]`/`[ASSISTANT]`. Provider offline → `503`; sem `supportsTranscript` → `501`.
 
 ```bash
@@ -450,8 +430,9 @@ correlacionado por `id`, payload `{ "transcript": [...] }`):
 }
 ```
 
-**`SEND_PROMPT`** — payload simplificado (o contrato textual vive dentro de
-`systemPrompt`/`prompt`; `conversation`, `options` e `expectFormat` foram removidos):
+**`SEND_PROMPT`** — payload simplificado (o texto é **verbatim**: o `systemPrompt`
+é o system do perfil sem tags e `prompt` é o transcript montado pelo gateway;
+`tools`/`options`/`conversation`/`expectFormat` foram removidos):
 
 ```json
 {
@@ -462,8 +443,9 @@ correlacionado por `id`, payload `{ "transcript": [...] }`):
     "provider": "gemini",
     "model": "gemini-pro",
     "newChat": true,
-    "systemPrompt": "[SYSTEM] Você é um assistente útil. Responda de forma concisa\n[OPTIONS] temperature=0.7\n[TOOLS] ferramentas disponíveis (uma por linha, formato chave=valor, sem JSON):\n[TOOL] name=shopping | desc=... | item:string\n[MODE TOOL_CALLING] Se for necessário chamar uma ferramenta, emita EXATAMENTE uma linha por chamada neste formato: ...",
-    "prompt": "[FullPrompt/transcript reduzido e montado pelo gateway]"
+    "systemPrompt": "Você é um assistente útil. Responda de forma concisa e direta.",
+    "prompt": "[USER] O que é capoeira?"
+
   }
 }
 ```
@@ -507,33 +489,23 @@ e mais sujeitos a mudanças no DOM dos provedores (especialmente Gemini e Copilo
 
 ## 8. Montagem do Prompt (Gateway)
 
-O gateway transforma a requisição (form) no prompt da Web:
+O gateway transforma a requisição (form) no prompt da Web de forma **pass-through
+verbatim** — não adiciona tags nem contratos próprios:
 
-1. **Envelope de sistema** = system prompt do perfil + instruções derivadas de
-   `options` + contrato de tool calling (se houver `tools`):
-
-   ```
-   [SYSTEM]
-   <system_prompt do perfil>
-   [OPTIONS] temperature=0.7; num_predict=512; stop=STOP
-   [TOOLS] ferramentas disponíveis (uma por linha, formato chave=valor, sem JSON):
-   [TOOL] name=shopping | desc=... | item:string | quantidade:int
-   [MODE TOOL_CALLING] Se for necessário chamar uma ferramenta, emita EXATAMENTE
-   uma linha por chamada neste formato (sem blocos de código, sem JSON e sem
-   marcação markdown):
-
-   [TOOL_CALL] nome_da_ferramenta | chave1=valor1 | chave2=valor2
-   ```
-
+1. **System prompt** = system do perfil **verbatim**, sem `[SYSTEM]`/`[OPTIONS]`/
+   `[TOOLS]`/`[MODE TOOL_CALLING]`. A formatação é responsabilidade exclusiva da
+   ferramenta que consome o host.
 2. **Transcript de conversa** (para `/api/chat`): mensagens serializadas em turnos
-   com tags de linha única (`[SYSTEM]`, `[USER]`, `[ASSISTANT]`, `[TOOL_CALL] nome |
-   chave=valor`, `[TOOL_RESULT] (id) conteúdo`) dentro do `prompt`, precedidas do
-   system. Por padrão, cada requisição inicia **novo chat na Web** (`new_chat=true`);
-   quando `new_chat=false`, a extensão injeta no chat aberto e emite os headers do
-   system apenas na **primeira interação da sessão** — nas iterações seguintes envia
-   só o transcript (sem `[SYSTEM]`/`[TOOLS]`) até que um `new_chat=true` reinicie a sessão.
-
+   apenas com os rótulos `[USER]`/`[ASSISTANT]` (role `system` entra como conteúdo
+   puro) dentro do `prompt`, precedidas do system. Por padrão, cada requisição
+   inicia **novo chat na Web** (`new_chat=true`); quando `new_chat=false`, a
+   extensão injeta o prompt no chat aberto e emite o system apenas na **primeira
+   interação da sessão** — nas iterações seguintes envia só o transcript até que um
+   `new_chat=true` reinicie a sessão.
 3. **Templates**: se o perfil define `template`, aplicado sobre `system + prompt`.
+
+4. **Resposta**: o texto da Web é devolvido **verbatim**, sem parse de
+   `[TOOL_CALL]` ou qualquer transformação.
 
 > **Sem `format:"json"`:** não há mais `[MODE_JSON]`/`[JSON_START]`/`[JSON_END]` —
 > essa saída estruturada foi removida nesta revisão.
@@ -552,7 +524,6 @@ Todos os erros HTTP retornam corpo **`text/plain`** com a mensagem:
 | Fila cheia para o provider | `503` | `bridge queue full (10)` |
 | Timeout de geração na Web | `504` | `bridge timeout after the configured window` |
 | Extensão reportou `ERROR` | `502` | mensagem vinda da extensão |
-| `role=tool` sem `tools` | `400` | `role 'tool' exige o campo 'tools' no request (tool calling simulado)` |
 | `pull`/`push`/`blobs`/`embed` | `501` | ver §5.11 |
 | Provider sem `supportsTranscript` | `501` | `no transcript support for provider '...'` |
 
@@ -571,9 +542,9 @@ Todos os erros HTTP retornam corpo **`text/plain`** com a mensagem:
   final ou `STREAM_UPDATE` incremental); nunca NDJSON.
 - **RNF-05 (Latência):** `executionTimeMs` da resposta vira meta-dado interno; o corpo
   entregue ao cliente é somente texto.
-- **RNF-06 (Texto puro):** **nenhum JSON** entre agente local, gateway e UI Web; a
-  conversão de estrutura (quando existir) ocorre no gestor de tool calling, que
-  trabalha com linhas `[TOOL_CALL] nome | chave=valor`.
+- **RNF-06 (Texto puro):** **nenhum JSON** entre agente local, gateway e UI Web;
+  o texto trafega **verbatim** (pass-through), sem tags nem contrato adicionados
+  pelo host.
 
 ---
 
@@ -592,7 +563,7 @@ capoeira-host/
 │   ├── gateway.py            # form → SEND_PROMPT → texto → RESPONSE/STREAM_UPDATE
 │   ├── watcher.py            # ChatWatcher: ingest de CHAT_UPDATE, estado por provider, long-poll
 │   ├── queue.py              # FIFO por provider + locks
-│   ├── prompt_builder.py     # envelope de sistema, transcript, contrato textual
+│   ├── prompt_builder.py     # system verbatim, transcript, template
 │   └── errors.py             # erros text/plain padronizados
 ├── extension/
 │   ├── manifest.json         # Chrome MV3 (ws://127.0.0.1:8766/* + adaptadores ativos)
@@ -658,5 +629,5 @@ curl http://127.0.0.1:8765/api/version
 - CLI do usuário (agente de terminal).
 - Redução de contexto (Tree-Sitter/AST, skeleton, grafos de dependência).
 - Aplicador de diffs / escrita em arquivos locais.
-- Embeddings, upload de imagens, pull/push de modelos. *(Tool calling é suportado
-  de forma **simulada** via contrato textual — ver §5.5.)*
+- Embeddings, upload de imagens, pull/push de modelos. *(Tool calling nativo não é
+  suportado pelo host; o texto é pass-through verbatim — ver §5.5.)*

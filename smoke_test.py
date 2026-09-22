@@ -30,7 +30,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 ERROR_HINTS = {
-    400: "Campos obrigatórios ausentes ou role/tool inválido.",
+    400: "Campos obrigatórios ausentes ou role inválido.",
     404: "Modelo não registrado no registry.",
     501: "Endpoint não aplicável ao CapoeiraHost.",
     502: "Falha reportada pela extensão durante a geração na Web.",

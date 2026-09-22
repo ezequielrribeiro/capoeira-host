@@ -11,7 +11,7 @@ from .ollama_dto import VERSION, ChatMessage, ChatRequest, GenerateRequest
 from .prompt_builder import PROVIDERS, build_chat_transcript
 from .registry import Profile
 
-ALLOWED_CHAT_ROLES = ("user", "assistant", "system", "tool")
+ALLOWED_CHAT_ROLES = ("user", "assistant", "system")
 
 
 def _transcript_to_messages(transcript: list[dict]) -> list[ChatMessage]:
@@ -68,8 +68,6 @@ def _parse_messages(form) -> list[ChatMessage]:
             messages.append(current)
         elif key == "content" and current is not None:
             current.content = value
-        elif key == "tool_call_id" and current is not None:
-            current.tool_call_id = value
     return [m for m in messages if m.role in ALLOWED_CHAT_ROLES]
 
 
@@ -165,13 +163,6 @@ def build_router() -> APIRouter:
         messages = _parse_messages(form)
         if not messages:
             raise BadRequest("campo 'messages' vazio: envie pares role/content")
-        tools = (form.get("tools") or "").strip() or None
-        tool_mode = bool(tools)
-        for m in messages:
-            if not tool_mode and m.role == "tool":
-                raise BadRequest(
-                    "role 'tool' exige o campo 'tools' no request (tool calling simulado)"
-                )
 
         _require_online(bridge, profile.provider)
 
@@ -180,7 +171,6 @@ def build_router() -> APIRouter:
         req = ChatRequest(
             model=model,
             messages=messages,
-            tools=tools,
             stream=_bool(form.get("stream")),
             new_chat=_bool(form.get("new_chat")) if form.get("new_chat") is not None else None,
             options=_parse_options(form),

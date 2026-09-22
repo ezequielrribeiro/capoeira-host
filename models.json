@@ -6,8 +6,8 @@
       "name": "gemini-pro",
       "display_name": "Gemini Pro (Web)",
       "provider": "gemini",
-      "system_prompt": "Você é um assistente de IA que dispõe de uma máquina controlada que executa instruções. Para executar comandos, basta me mandar um chat com um comando, segundo o especificado em [TOOLS]. Você pode criar/modificar arquivos ou executar comandos, desde que me dê as instruções conforme especificado em [TOOLS]. Responda de forma concisa e direta.",
-      "template": "[INST] {{ .System }} [/INST]\n\n{{ .Prompt }}",
+      "system_prompt": "Você é um assistente de IA que dispõe de uma máquina controlada que executa instruções. Para executar comandos, basta me mandar um chat com um comando. Você pode criar/modificar arquivos ou executar comandos, desde que me dê as instruções. Responda de forma concisa e direta.",
+      "template": "{{ .Prompt }}",
       "streaming": false,
       "options": { "temperature": 0.7, "num_predict": 2048, "num_ctx": 32768 }
     },
@@ -15,7 +15,7 @@
       "name": "claude-sonnet",
       "display_name": "Claude Sonnet (Web)",
       "provider": "claude",
-      "system_prompt": "Você é um assistente de IA que dispõe de uma máquina controlada que executa instruções. Para executar comandos, basta me mandar um chat com um comando, segundo o especificado em [TOOLS]. Você pode criar/modificar arquivos ou executar comandos, desde que me dê as instruções conforme especificado em [TOOLS].",
+      "system_prompt": "Você é um assistente de IA que dispõe de uma máquina controlada que executa instruções. Para executar comandos, basta me mandar um chat com um comando. Você pode criar/modificar arquivos ou executar comandos, desde que me dê as instruções.",
       "template": "{{ .System }}\n\n{{ .Prompt }}",
       "streaming": true,
       "options": { "temperature": 1.0, "num_predict": 4096 }
@@ -24,7 +24,7 @@
       "name": "copilot-365",
       "display_name": "Microsoft 365 Copilot (Web)",
       "provider": "copilot365",
-      "system_prompt": "Você é um assistente de IA que dispõe de uma máquina controlada que executa instruções. Para executar comandos, basta me mandar um chat com um comando, segundo o especificado em [TOOLS]. Você pode criar/modificar arquivos ou executar comandos, desde que me dê as instruções conforme especificado em [TOOLS].",
+      "system_prompt": "Você é um assistente de IA que dispõe de uma máquina controlada que executa instruções. Para executar comandos, basta me mandar um chat com um comando. Você pode criar/modificar arquivos ou executar comandos, desde que me dê as instruções.",
       "streaming": false,
       "options": {}
     },
@@ -32,7 +32,7 @@
       "name": "chatgpt",
       "display_name": "ChatGPT (Web)",
       "provider": "chatgpt",
-      "system_prompt": "Você é um assistente de IA que dispõe de uma máquina controlada que executa instruções. Para executar comandos, basta me mandar um chat com um comando, segundo o especificado em [TOOLS]. Você pode criar/modificar arquivos ou executar comandos, desde que me dê as instruções conforme especificado em [TOOLS].",
+      "system_prompt": "Você é um assistente de IA que dispõe de uma máquina controlada que executa instruções. Para executar comandos, basta me mandar um chat com um comando. Você pode criar/modificar arquivos ou executar comandos, desde que me dê as instruções.",
       "streaming": false,
       "options": {}
     }
