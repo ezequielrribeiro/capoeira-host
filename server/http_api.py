@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import time
+import uuid
+from datetime import datetime, timezone
+from typing import Awaitable, Callable
 
 from fastapi import APIRouter, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse
 
 from .errors import BadRequest, BridgeOffline, UnsupportedError
 from .gateway import Gateway
@@ -71,6 +75,78 @@ def _parse_messages(form) -> list[ChatMessage]:
     return [m for m in messages if m.role in ALLOWED_CHAT_ROLES]
 
 
+# ------------------------------------------------------------------ push (resposta do LLM → API da aplicação)
+
+
+def _push_payload(
+    request_id: str,
+    profile: Profile,
+    endpoint: str,
+    text: str,
+    stream: bool,
+    error: str | None = None,
+) -> dict:
+    payload = {
+        "request_id": request_id,
+        "model": profile.name,
+        "provider": profile.provider,
+        "endpoint": endpoint,
+        "stream": stream,
+        "text": text,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if error is not None:
+        payload["error"] = error
+    return payload
+
+
+async def _push_result(
+    request: Request,
+    request_id: str,
+    profile: Profile,
+    endpoint: str,
+    text: str,
+    stream: bool,
+    error: str | None = None,
+) -> None:
+    app_client = request.app.state.app_client
+    registrar = request.app.state.app_registrar
+    await app_client.notify(
+        registrar.current(),
+        _push_payload(request_id, profile, endpoint, text, stream, error=error),
+    )
+
+
+async def _dispatch(
+    request: Request,
+    request_id: str,
+    profile: Profile,
+    endpoint: str,
+    stream: bool,
+    generate: Callable[[], Awaitable[str]],
+) -> None:
+    """Executa a geração do LLM em background e entrega o resultado à aplicação."""
+    try:
+        text = await generate()
+        await _push_result(request, request_id, profile, endpoint, text, stream)
+    except Exception as exc:  # noqa: BLE001 - erro de geração é reportado à aplicação
+        await _push_result(
+            request,
+            request_id,
+            profile,
+            endpoint,
+            "",
+            stream,
+            error=getattr(exc, "message", None) or str(exc),
+        )
+
+
+def _schedule_generation(request: Request, coro: Awaitable[None]) -> None:
+    task = asyncio.create_task(coro)
+    request.app.state.background_tasks.add(task)
+    task.add_done_callback(request.app.state.background_tasks.discard)
+
+
 def build_router() -> APIRouter:
     router = APIRouter()
 
@@ -106,10 +182,38 @@ def build_router() -> APIRouter:
             lines.append(f"{p.name} | provider={p.provider} | status={status}")
         return PlainTextResponse("\n".join(lines))
 
+    # ------------------------------------------------------------------ app (registro da aplicação)
+
+    @router.get("/api/app")
+    def app_status(request: Request) -> PlainTextResponse:
+        app = request.app.state.app_registrar.current()
+        if app is None:
+            return PlainTextResponse("no app registered")
+        return PlainTextResponse(f"name={app.name or 'unnamed'} | host={app.host} | port={app.port}")
+
+    @router.post("/api/app/register")
+    async def app_register(request: Request) -> PlainTextResponse:
+        form = await request.form()
+        try:
+            port = int((form.get("port") or "").strip())
+        except ValueError:
+            raise BadRequest("campo 'port' deve ser um inteiro")
+        if not (0 < port < 65536):
+            raise BadRequest("campo 'port' deve estar entre 1 e 65535")
+        host = (form.get("host") or "").strip() or "127.0.0.1"
+        name = (form.get("name") or "").strip()
+        app = request.app.state.app_registrar.register(port, host=host, name=name)
+        return PlainTextResponse(f"ok host={app.host} port={app.port}")
+
+    @router.post("/api/app/unregister")
+    async def app_unregister(request: Request) -> PlainTextResponse:
+        request.app.state.app_registrar.unregister()
+        return PlainTextResponse("ok")
+
     # ------------------------------------------------------------------ generate
 
     @router.post("/api/generate", response_model=None)
-    async def generate(request: Request) -> PlainTextResponse | StreamingResponse:
+    async def generate(request: Request) -> PlainTextResponse:
         form = await request.form()
         model = (form.get("model") or "").strip()
         prompt = (form.get("prompt") or "").strip()
@@ -137,17 +241,22 @@ def build_router() -> APIRouter:
             options=_parse_options(form),
         )
 
-        if req.stream:
-            return StreamingResponse(
-                gateway.generate_text(profile, req, deadline, new_chat=new_chat),
-                media_type="text/plain; charset=utf-8",
-            )
-        return PlainTextResponse(await gateway.generate(profile, req, deadline, new_chat=new_chat))
+        request_id = str(uuid.uuid4())
+        coro = _dispatch(
+            request,
+            request_id,
+            profile,
+            "generate",
+            req.stream,
+            lambda: gateway.generate(profile, req, deadline, new_chat=new_chat),
+        )
+        _schedule_generation(request, coro)
+        return PlainTextResponse(f"accepted: {request_id}")
 
     # ------------------------------------------------------------------ chat
 
     @router.post("/api/chat", response_model=None)
-    async def chat(request: Request) -> PlainTextResponse | StreamingResponse:
+    async def chat(request: Request) -> PlainTextResponse:
         form = await request.form()
         model = (form.get("model") or "").strip()
         if not model:
@@ -176,12 +285,17 @@ def build_router() -> APIRouter:
             options=_parse_options(form),
         )
 
-        if req.stream:
-            return StreamingResponse(
-                gateway.chat_text(profile, req, deadline, new_chat=new_chat),
-                media_type="text/plain; charset=utf-8",
-            )
-        return PlainTextResponse(await gateway.chat(profile, req, deadline, new_chat=new_chat))
+        request_id = str(uuid.uuid4())
+        coro = _dispatch(
+            request,
+            request_id,
+            profile,
+            "chat",
+            req.stream,
+            lambda: gateway.chat(profile, req, deadline, new_chat=new_chat),
+        )
+        _schedule_generation(request, coro)
+        return PlainTextResponse(f"accepted: {request_id}")
 
     # ------------------------------------------------------------------ read chat
 
@@ -201,44 +315,6 @@ def build_router() -> APIRouter:
         body = build_chat_transcript(_transcript_to_messages(transcript))
 
         response = PlainTextResponse(body)
-        _set_revision_header(request, profile, response)
-        return response
-
-    # ------------------------------------------------------------------ watch chat
-
-    @router.post("/api/chat/watch")
-    async def chat_watch(request: Request) -> PlainTextResponse:
-        form = await request.form()
-        model = (form.get("model") or "").strip()
-        if not model:
-            raise BadRequest("campo 'model' é obrigatório")
-
-        registry = request.app.state.registry
-        bridge = request.app.state.bridge
-        watcher = request.app.state.watcher
-        settings = request.app.state.settings
-        profile: Profile = registry.require(model)
-        _require_online(bridge, profile.provider)
-        session = bridge.get_session(profile.provider)
-        if session is not None and not session.supports_transcript:
-            raise UnsupportedError(f"no transcript support for provider '{profile.provider}'")
-
-        try:
-            revision = int((form.get("revision") or "0").strip())
-        except ValueError:
-            raise BadRequest("campo 'revision' deve ser um inteiro")
-        try:
-            timeout = float(form.get("timeout") or str(settings.watch_timeout))
-        except ValueError:
-            raise BadRequest("campo 'timeout' deve ser um número")
-        timeout = max(0.0, min(timeout, settings.watch_timeout))
-
-        events = await watcher.wait_events(profile.provider, revision, timeout)
-        lines: list[str] = []
-        for event in events:
-            lines.extend(build_chat_transcript(_transcript_to_messages(event.messages)).splitlines())
-
-        response = PlainTextResponse("\n".join(lines))
         _set_revision_header(request, profile, response)
         return response
 

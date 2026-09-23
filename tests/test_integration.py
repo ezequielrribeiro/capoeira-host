@@ -4,6 +4,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 import websockets
@@ -68,6 +69,7 @@ def app(models_file):
         models_file=models_file,
         timeout=5.0,
         queue_size=10,
+        app_port=28767,
     )
     return create_app(settings)
 
@@ -81,8 +83,77 @@ def app_reuse_chat(models_file):
         timeout=5.0,
         queue_size=10,
         new_chat=False,
+        app_port=28767,
     )
     return create_app(settings)
+
+
+class FakeApp:
+    """Servidor REST fake da aplicação consumidora.
+
+    Captura os POSTs JSON do contrato de resposta e os expõe em ``payloads``
+    (o primeiro a chegar em ``wait_payload``). Registrar ``self.port`` em
+    ``POST /api/app/register`` faz o CapoeiraHost entregar a resposta aqui.
+    """
+
+    def _make_handler(self):
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length)
+                with fake.lock:
+                    fake.payloads.append(json.loads(body.decode("utf-8")))
+                self.send_response(200)
+                self.end_headers()
+                try:
+                    self.wfile.write(b"ok")
+                except Exception:
+                    pass
+
+            def log_message(self, *args):
+                pass
+
+        return Handler
+
+    def __enter__(self):
+        self.payloads = []
+        self.lock = threading.Lock()
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
+        self.port = self._httpd.server_address[1]
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._httpd.shutdown()
+        self._httpd.server_close()
+        self._thread.join(timeout=10)
+
+    def wait_payload(self, timeout=POLL_TIMEOUT):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self.lock:
+                if self.payloads:
+                    return self.payloads[0]
+            time.sleep(0.05)
+        return None
+
+
+def register_app(client, fake_app, name="test-app"):
+    resp = client.post(
+        "/api/app/register",
+        data={"port": str(fake_app.port), "name": name},
+    )
+    assert resp.status_code == 200
+    return resp
+
+
+def unregister_app(client):
+    resp = client.post("/api/app/unregister")
+    assert resp.status_code == 200
+    return resp
 
 
 def start_fake_bridge(
@@ -95,6 +166,7 @@ def start_fake_bridge(
     transcript=None,
     supports_transcript=True,
     chat_updates=None,
+    error=None,
 ):
     """Simula a extensão do navegador: conecta no WS do bridge, envia HELLO,
     aguarda SEND_PROMPT e devolve parciais (se streaming) + RESPONSE final.
@@ -183,21 +255,35 @@ def start_fake_bridge(
                             )
                         )
                         await asyncio.sleep(0.05)
-                    await ws.send(
-                        json.dumps(
-                            {
-                                "version": "1.0",
-                                "action": "RESPONSE",
-                                "status": "SUCCESS",
-                                "id": msg["id"],
-                                "payload": {
-                                    "rawResponse": response_text,
-                                    "executionTimeMs": 50,
-                                },
-                                "error": None,
-                            }
+                    if error is not None:
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "version": "1.0",
+                                    "action": "ERROR",
+                                    "status": "ERROR",
+                                    "id": msg["id"],
+                                    "payload": None,
+                                    "error": error,
+                                }
+                            )
                         )
-                    )
+                    else:
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "version": "1.0",
+                                    "action": "RESPONSE",
+                                    "status": "SUCCESS",
+                                    "id": msg["id"],
+                                    "payload": {
+                                        "rawResponse": response_text,
+                                        "executionTimeMs": 50,
+                                    },
+                                    "error": None,
+                                }
+                            )
+                        )
                     return
 
         try:
@@ -231,20 +317,20 @@ def post_until(client, path, fields, timeout=POLL_TIMEOUT):
     return last
 
 
-def watch_until(client, path, fields, timeout=POLL_TIMEOUT):
-    """Repete o POST até a resposta vir 200 com texto não vazio, ou o provider
-    responder erro definitivo (400/501); 503 (ainda conectando) e 200 com corpo
-    vazio (sem update) fazem manter o loop até o timeout."""
+def wait_received(ctx, timeout=POLL_TIMEOUT):
     deadline = time.monotonic() + timeout
-    last = None
     while time.monotonic() < deadline:
-        last = client.post(path, data=fields)
-        if last.status_code not in (200, 503):
-            return last
-        if last.status_code == 200 and last.text.strip():
-            return last
-        time.sleep(0.1)
-    return last
+        if ctx["received"]:
+            return ctx["received"]
+        time.sleep(0.05)
+    return ctx["received"]
+
+
+def assert_ack(resp):
+    assert resp.status_code == 200
+    assert resp.text.startswith("accepted: ")
+    assert "text/plain" in resp.headers["content-type"]
+    return resp.text.split("accepted: ", 1)[1]
 
 
 # ------------------------------------------------------------------ smoke
@@ -278,27 +364,36 @@ def test_chat_without_bridge_returns_503(app):
         assert "text/plain" in resp.headers["content-type"]
 
 
-# ------------------------------------------------------------------ e2e bridge
+# ------------------------------------------------------------------ e2e push (bridge → app)
 
 
 def test_chat_via_fake_extension(app):
     thread, ctx = start_fake_bridge("gemini", "A capoeira é uma arte afro-brasileira.")
     try:
-        with TestClient(app) as client:
+        with TestClient(app) as client, FakeApp() as fake_app:
+            register_app(client, fake_app)
             resp = post_until(
                 client,
                 "/api/chat",
                 {"model": "gemini-pro", "role": "user", "content": "O que é capoeira?"},
             )
-            assert resp.status_code == 200
-            assert resp.text == "A capoeira é uma arte afro-brasileira."
-            assert "text/plain" in resp.headers["content-type"]
+            request_id = assert_ack(resp)
 
-            assert ctx["received"], "bridge não recebeu SEND_PROMPT"
-            payload = ctx["received"][0]["payload"]
-            assert payload["systemPrompt"] == "Você é um assistente útil."
-            assert "[USER] O que é capoeira?" in payload["prompt"]
-            assert payload["newChat"] is True
+            payload = fake_app.wait_payload()
+            assert payload is not None, "resposta não foi entregue à aplicação"
+            assert payload["request_id"] == request_id
+            assert payload["model"] == "gemini-pro"
+            assert payload["provider"] == "gemini"
+            assert payload["endpoint"] == "chat"
+            assert payload["text"] == "A capoeira é uma arte afro-brasileira."
+            assert "error" not in payload
+
+            received = wait_received(ctx)
+            assert received, "bridge não recebeu SEND_PROMPT"
+            spayload = received[0]["payload"]
+            assert spayload["systemPrompt"] == "Você é um assistente útil."
+            assert "[USER] O que é capoeira?" in spayload["prompt"]
+            assert spayload["newChat"] is True
     finally:
         thread.join(timeout=10)
 
@@ -306,24 +401,32 @@ def test_chat_via_fake_extension(app):
 def test_generate_via_fake_extension(app):
     thread, ctx = start_fake_bridge("gemini", "Expliquei a capoeira.")
     try:
-        with TestClient(app) as client:
+        with TestClient(app) as client, FakeApp() as fake_app:
+            register_app(client, fake_app)
             resp = post_until(
                 client,
                 "/api/generate",
                 {"model": "gemini-pro", "prompt": "O que é capoeira?"},
             )
-            assert resp.status_code == 200
-            assert resp.text == "Expliquei a capoeira."
-            assert ctx["received"], "bridge não recebeu SEND_PROMPT"
-            payload = ctx["received"][0]["payload"]
-            assert payload["systemPrompt"] == "Você é um assistente útil."
-            assert "[SYSTEM]" not in payload["systemPrompt"]
-            assert payload["newChat"] is True
+            request_id = assert_ack(resp)
+
+            payload = fake_app.wait_payload()
+            assert payload is not None, "resposta não foi entregue à aplicação"
+            assert payload["request_id"] == request_id
+            assert payload["endpoint"] == "generate"
+            assert payload["text"] == "Expliquei a capoeira."
+
+            received = wait_received(ctx)
+            assert received, "bridge não recebeu SEND_PROMPT"
+            spayload = received[0]["payload"]
+            assert spayload["systemPrompt"] == "Você é um assistente útil."
+            assert "[SYSTEM]" not in spayload["systemPrompt"]
+            assert spayload["newChat"] is True
     finally:
         thread.join(timeout=10)
 
 
-def test_streaming_plain_text_via_fake_extension(app):
+def test_streaming_plain_text_pushed_complete(app):
     thread, ctx = start_fake_bridge(
         "claude",
         "A capoeira é uma arte.",
@@ -331,7 +434,8 @@ def test_streaming_plain_text_via_fake_extension(app):
         partials=["A capoeira ", "é uma arte."],
     )
     try:
-        with TestClient(app) as client:
+        with TestClient(app) as client, FakeApp() as fake_app:
+            register_app(client, fake_app)
             resp = post_until(
                 client,
                 "/api/chat",
@@ -342,15 +446,17 @@ def test_streaming_plain_text_via_fake_extension(app):
                     "content": "O que é capoeira?",
                 },
             )
-            assert resp.status_code == 200
-            assert "text/plain" in resp.headers["content-type"]
-            assert resp.text == "A capoeira é uma arte."
-            assert ctx["received"], "bridge não recebeu SEND_PROMPT"
+            assert_ack(resp)
+            payload = fake_app.wait_payload()
+            assert payload is not None
+            assert payload["text"] == "A capoeira é uma arte."
+            assert payload["stream"] is True
+            assert wait_received(ctx), "bridge não recebeu SEND_PROMPT"
     finally:
         thread.join(timeout=10)
 
 
-# --------------------------- validação de origem (CSWSH) ---------------------------
+# --------------------------------------------- validação de origem (CSWSH) --
 
 
 def test_bridge_accepts_web_provider_origin(app):
@@ -360,15 +466,15 @@ def test_bridge_accepts_web_provider_origin(app):
         origin="https://gemini.google.com",
     )
     try:
-        with TestClient(app) as client:
+        with TestClient(app) as client, FakeApp() as fake_app:
+            register_app(client, fake_app)
             resp = post_until(
                 client,
                 "/api/chat",
                 {"model": "gemini-pro", "role": "user", "content": "oi"},
             )
-            assert resp.status_code == 200
-            assert resp.text == "A capoeira é uma arte afro-brasileira."
-            assert ctx["received"], "bridge rejeitou a conexão com origem de página"
+            assert_ack(resp)
+            assert wait_received(ctx), "bridge rejeitou a conexão com origem de página"
             assert ctx["error"] is None
     finally:
         thread.join(timeout=10)
@@ -395,7 +501,7 @@ def test_bridge_rejects_unknown_origin(app):
         raise
 
 
-# --------------------------- Copilot 365 (m365.cloud.microsoft) ---------------------------
+# --------------------------- Copilot 365 (m365.cloud.microsoft) ----- ------
 
 
 def test_bridge_accepts_m365_copilot_origin(app):
@@ -405,7 +511,8 @@ def test_bridge_accepts_m365_copilot_origin(app):
         origin="https://m365.cloud.microsoft",
     )
     try:
-        with TestClient(app) as client:
+        with TestClient(app) as client, FakeApp() as fake_app:
+            register_app(client, fake_app)
             resp = post_until(
                 client,
                 "/api/chat",
@@ -415,9 +522,8 @@ def test_bridge_accepts_m365_copilot_origin(app):
                     "content": "Quem é você?",
                 },
             )
-            assert resp.status_code == 200
-            assert resp.text == "Sou o Copilot da Microsoft 365."
-            assert ctx["received"], "bridge rejeitou a origem de m365.cloud.microsoft"
+            assert_ack(resp)
+            assert wait_received(ctx), "bridge rejeitou a origem de m365.cloud.microsoft"
             assert ctx["error"] is None
     finally:
         thread.join(timeout=10)
@@ -426,23 +532,27 @@ def test_bridge_accepts_m365_copilot_origin(app):
 def test_chat_via_copilot365_bridge(app):
     thread, ctx = start_fake_bridge("copilot365", "Resposta do Copilot 365.")
     try:
-        with TestClient(app) as client:
+        with TestClient(app) as client, FakeApp() as fake_app:
+            register_app(client, fake_app)
             resp = post_until(
                 client,
                 "/api/chat",
                 {"model": "copilot-365", "role": "user", "content": "Oi Copilot"},
             )
-            assert resp.status_code == 200
-            assert resp.text == "Resposta do Copilot 365."
-            assert ctx["received"]
-            payload = ctx["received"][0]["payload"]
-            assert payload["provider"] == "copilot365"
-            assert payload["newChat"] is True
+            assert_ack(resp)
+            payload = fake_app.wait_payload()
+            assert payload is not None
+            assert payload["text"] == "Resposta do Copilot 365."
+            received = wait_received(ctx)
+            assert received
+            spayload = received[0]["payload"]
+            assert spayload["provider"] == "copilot365"
+            assert spayload["newChat"] is True
     finally:
         thread.join(timeout=10)
 
 
-# --------------------------- reutilização de chat (new_chat) ---------------------------
+# --------------------------- reutilização de chat (new_chat) ----- ----------
 
 
 def test_chat_new_chat_false_from_global_default(app_reuse_chat):
@@ -454,9 +564,10 @@ def test_chat_new_chat_false_from_global_default(app_reuse_chat):
                 "/api/chat",
                 {"model": "gemini-pro", "role": "user", "content": "oi"},
             )
-            assert resp.status_code == 200
-            assert ctx["received"]
-            assert ctx["received"][0]["payload"]["newChat"] is False
+            assert_ack(resp)
+            received = wait_received(ctx)
+            assert received
+            assert received[0]["payload"]["newChat"] is False
     finally:
         thread.join(timeout=10)
 
@@ -475,9 +586,10 @@ def test_chat_new_chat_false_via_request_override(app):
                     "content": "oi",
                 },
             )
-            assert resp.status_code == 200
-            assert ctx["received"]
-            assert ctx["received"][0]["payload"]["newChat"] is False
+            assert_ack(resp)
+            received = wait_received(ctx)
+            assert received
+            assert received[0]["payload"]["newChat"] is False
     finally:
         thread.join(timeout=10)
 
@@ -496,9 +608,10 @@ def test_chat_new_chat_true_overrides_global_false(app_reuse_chat):
                     "content": "oi",
                 },
             )
-            assert resp.status_code == 200
-            assert ctx["received"]
-            assert ctx["received"][0]["payload"]["newChat"] is True
+            assert_ack(resp)
+            received = wait_received(ctx)
+            assert received
+            assert received[0]["payload"]["newChat"] is True
     finally:
         thread.join(timeout=10)
 
@@ -506,7 +619,8 @@ def test_chat_new_chat_true_overrides_global_false(app_reuse_chat):
 def test_generate_new_chat_false_via_request_override(app):
     thread, ctx = start_fake_bridge("gemini", "Resposta sem novo chat.")
     try:
-        with TestClient(app) as client:
+        with TestClient(app) as client, FakeApp() as fake_app:
+            register_app(client, fake_app)
             resp = post_until(
                 client,
                 "/api/generate",
@@ -516,15 +630,15 @@ def test_generate_new_chat_false_via_request_override(app):
                     "new_chat": "false",
                 },
             )
-            assert resp.status_code == 200
-            assert resp.text == "Resposta sem novo chat."
-            assert ctx["received"]
-            assert ctx["received"][0]["payload"]["newChat"] is False
+            assert_ack(resp)
+            received = wait_received(ctx)
+            assert received
+            assert received[0]["payload"]["newChat"] is False
     finally:
         thread.join(timeout=10)
 
 
-# --------------------------- pass-through verbatim (sem tags do host) ---------------------------
+# --------------------------- pass-through verbatim (sem tags do host) ------
 
 
 def test_chat_system_verbatim_without_tags(app):
@@ -537,9 +651,10 @@ def test_chat_system_verbatim_without_tags(app):
                 "/api/chat",
                 {"model": "gemini-pro", "role": "user", "content": "X"},
             )
-            assert resp.status_code == 200
-            assert ctx["received"], "bridge não recebeu SEND_PROMPT"
-            system = ctx["received"][0]["payload"]["systemPrompt"]
+            assert_ack(resp)
+            received = wait_received(ctx)
+            assert received, "bridge não recebeu SEND_PROMPT"
+            system = received[0]["payload"]["systemPrompt"]
             assert system == "Você é um assistente útil."
             assert "[SYSTEM]" not in system
             assert "[OPTIONS]" not in system
@@ -565,9 +680,10 @@ def test_chat_transcript_keeps_user_assistant_labels(app):
                     ("content", "Uma lenda."),
                 ],
             )
-            assert resp.status_code == 200
-            assert ctx["received"]
-            prompt = ctx["received"][0]["payload"]["prompt"]
+            assert_ack(resp)
+            received = wait_received(ctx)
+            assert received
+            prompt = received[0]["payload"]["prompt"]
             assert "[USER] Quem foi Besouro?" in prompt
             assert "[ASSISTANT] Uma lenda." in prompt
     finally:
@@ -575,18 +691,21 @@ def test_chat_transcript_keeps_user_assistant_labels(app):
 
 
 def test_response_verbatim_no_tool_parsing(app):
-    """A resposta é devolvida verbatim, sem extração/strip de [TOOL_CALL]."""
+    """A resposta é entregue à aplicação verbatim, sem extração de [TOOL_CALL]."""
     line_response = "Vou buscar isso.\n[TOOL_CALL] shopping | item=leite"
     thread, ctx = start_fake_bridge("gemini", line_response)
     try:
-        with TestClient(app) as client:
+        with TestClient(app) as client, FakeApp() as fake_app:
+            register_app(client, fake_app)
             resp = post_until(
                 client,
                 "/api/chat",
                 {"model": "gemini-pro", "role": "user", "content": "Compre leite."},
             )
-            assert resp.status_code == 200
-            assert resp.text == line_response
+            assert_ack(resp)
+            payload = fake_app.wait_payload()
+            assert payload is not None
+            assert payload["text"] == line_response
     finally:
         thread.join(timeout=10)
 
@@ -618,7 +737,7 @@ def test_unknown_role_rejected(app):
 
 
 def test_chat_streaming_verbatim(app):
-    """Em streaming sem tools, o texto chega verbatim pelos chunks."""
+    """Em streaming sem tools, o texto chega verbatim via push."""
     thread, ctx = start_fake_bridge(
         "gemini",
         "A capoeira é uma arte.",
@@ -626,7 +745,8 @@ def test_chat_streaming_verbatim(app):
         partials=["A capoeira ", "é uma arte."],
     )
     try:
-        with TestClient(app) as client:
+        with TestClient(app) as client, FakeApp() as fake_app:
+            register_app(client, fake_app)
             resp = post_until(
                 client,
                 "/api/chat",
@@ -637,14 +757,16 @@ def test_chat_streaming_verbatim(app):
                     "content": "O que é capoeira?",
                 },
             )
-            assert resp.status_code == 200
-            assert resp.text == "A capoeira é uma arte."
-            assert ctx["received"], "bridge não recebeu SEND_PROMPT"
+            assert_ack(resp)
+            payload = fake_app.wait_payload()
+            assert payload is not None
+            assert payload["text"] == "A capoeira é uma arte."
+            assert wait_received(ctx), "bridge não recebeu SEND_PROMPT"
     finally:
         thread.join(timeout=10)
 
 
-# --------------------------- read / watch do chat ---------------------------
+# --------------------------- read do chat -----------------------------------
 
 
 TRANSCRIPT = [
@@ -695,97 +817,7 @@ def test_chat_read_no_transcript_support_501(app):
         thread.join(timeout=10)
 
 
-def test_chat_watch_returns_delta(app):
-    update = {
-        "revision": 1,
-        "transcript": TRANSCRIPT,
-        "messages": TRANSCRIPT,
-    }
-    thread, ctx = start_fake_bridge("gemini", "x", chat_updates=[update])
-    try:
-        with TestClient(app) as client:
-            resp = watch_until(
-                client, "/api/chat/watch", {"model": "gemini-pro", "revision": "0"}
-            )
-            assert resp.status_code == 200
-            assert resp.text.strip() == (
-                "[USER] Quem foi Besouro Mangangá?\n"
-                "[ASSISTANT] Uma lenda da capoeira do recôncavo baiano."
-            )
-            assert resp.headers.get("X-Capoeira-Revision") == "1"
-    finally:
-        thread.join(timeout=10)
-
-
-def test_chat_watch_revision_filters_old_events(app):
-    update = {
-        "revision": 3,
-        "transcript": TRANSCRIPT,
-        "messages": TRANSCRIPT,
-    }
-    thread, ctx = start_fake_bridge("gemini", "x", chat_updates=[update])
-    try:
-        with TestClient(app) as client:
-            resp = watch_until(
-                client,
-                "/api/chat/watch",
-                {"model": "gemini-pro", "revision": "3"},
-                timeout=2.0,
-            )
-            assert resp.status_code == 200
-            assert resp.text.strip() == ""
-    finally:
-        thread.join(timeout=10)
-
-
-def test_chat_watch_timeout_returns_empty(app):
-    thread, ctx = start_fake_bridge("gemini", "x")
-    try:
-        with TestClient(app) as client:
-            resp = watch_until(
-                client,
-                "/api/chat/watch",
-                {"model": "gemini-pro", "revision": "0", "timeout": "0.5"},
-                timeout=2.0,
-            )
-            assert resp.status_code == 200
-            assert resp.text.strip() == ""
-    finally:
-        thread.join(timeout=10)
-
-
-def test_chat_watch_rejects_bad_revision(app):
-    thread, ctx = start_fake_bridge("gemini", "x")
-    try:
-        with TestClient(app) as client:
-            resp = post_until(
-                client, "/api/chat/watch", {"model": "gemini-pro", "revision": "abc"}
-            )
-            assert resp.status_code == 400
-    finally:
-        thread.join(timeout=10)
-
-
-def test_chat_watch_offline_503(app):
-    with TestClient(app) as client:
-        resp = client.post("/api/chat/watch", data={"model": "gemini-pro"})
-        assert resp.status_code == 503
-
-
-def test_chat_watch_no_transcript_support_501(app):
-    thread, ctx = start_fake_bridge("gemini", "x", supports_transcript=False)
-    try:
-        with TestClient(app) as client:
-            resp = post_until(
-                client, "/api/chat/watch", {"model": "gemini-pro", "revision": "0"}
-            )
-            assert resp.status_code == 501
-            assert "transcript" in resp.text
-    finally:
-        thread.join(timeout=10)
-
-
-# --------------------------- validação de form ---------------------------
+# --------------------------- validação de form -------------------------------
 
 
 def test_generate_requires_prompt(app):

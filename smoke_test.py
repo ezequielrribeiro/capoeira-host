@@ -1,17 +1,20 @@
-#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """Smoke test do CapoeiraHost.
 
 Envia uma requisição à API textual (form-urlencoded + text/plain) e exibe o
-retorno — inclusive streaming. Usa apenas a biblioteca padrão, sem dependências
-extras e sem problemas de quoting de shell.
+retorno. Usa apenas a biblioteca padrão, sem dependências extras e sem
+problemas de quoting de shell.
+
+Em modo push, ``generate``/``chat`` retornam um ack (``accepted: <request_id>``)
+imediatamente; a resposta do LLM é entregue à API da aplicação registrada (ou à
+porta padrão se nenhuma aplicação estiver registrada).
 
 Uso:
     python smoke_test.py
-    python smoke_test.py --endpoint generate --prompt "O que é capoeira?" --stream
-    python smoke_test.py --model claude-sonnet --stream
+    python smoke_test.py --endpoint generate --prompt "O que é capoeira?"
+    python smoke_test.py --model claude-sonnet
     python smoke_test.py --endpoint chat --new-chat false
     python smoke_test.py --endpoint read
-    python smoke_test.py --endpoint watch --revision 3 --timeout 20
 """
 
 from __future__ import annotations
@@ -52,12 +55,6 @@ def build_fields(args) -> list[tuple[str, str]]:
     elif args.endpoint == "chat":
         fields.append(("role", "user"))
         fields.append(("content", args.prompt))
-    elif args.endpoint == "watch":
-        fields.append(("revision", str(args.revision)))
-        if args.timeout:
-            fields.append(("timeout", str(args.timeout)))
-    if args.stream:
-        fields.append(("stream", "true"))
     if args.new_chat is not None:
         fields.append(("new_chat", args.new_chat))
     return fields
@@ -97,52 +94,23 @@ def read_non_stream(url: str, fields: list[tuple[str, str]]) -> None:
         sys.exit(1)
 
 
-def read_stream(url: str, fields: list[tuple[str, str]]) -> None:
-    try:
-        with urllib.request.urlopen(build_request(url, fields)) as resp:
-            print(f"HTTP {resp.status} (texto, streaming)")
-            for raw in resp:
-                text = raw.decode("utf-8")
-                if text:
-                    print(text, end="", flush=True)
-            print()
-    except urllib.error.HTTPError as exc:
-        handle_http_error(exc)
-    except urllib.error.URLError as exc:
-        print(f"Falha de conexão: {exc.reason}", file=sys.stderr)
-        print("O servidor está rodando? use 'python -m server.main'.", file=sys.stderr)
-        sys.exit(1)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke test do CapoeiraHost")
     parser.add_argument("--base-url", default=default_base_url())
     parser.add_argument("--model", default="gemini-pro")
     parser.add_argument("--prompt", default="Olá! O que é capoeira? Responda em uma frase.")
-    parser.add_argument("--endpoint", choices=["generate", "chat", "read", "watch"], default="chat")
-    parser.add_argument("--stream", action="store_true")
+    parser.add_argument("--endpoint", choices=["generate", "chat", "read"], default="chat")
     parser.add_argument(
         "--new-chat",
         choices=["true", "false"],
         default=None,
         help="Sobrescreve CAPOEIRA_NEW_CHAT por requisição (ausente = default do servidor).",
     )
-    parser.add_argument(
-        "--revision",
-        type=int,
-        default=0,
-        help="Última revision vista (endpoint 'watch'); eventos com revision maior são devolvidos.",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=None,
-        help="Tempo (s) de bloqueio no 'watch' antes de retornar vazio.",
-    )
     args = parser.parse_args()
 
     fields = build_fields(args)
-    url = f"{args.base_url}/api/{args.endpoint}"
+    endpoint_path = "chat/read" if args.endpoint == "read" else args.endpoint
+    url = f"{args.base_url}/api/{endpoint_path}"
 
     print("=" * 40)
     print(f"POST {url}")
@@ -151,10 +119,7 @@ def main() -> None:
         print(f"  {key} = {value}")
     print("=" * 40)
 
-    if args.stream:
-        read_stream(url, fields)
-    else:
-        read_non_stream(url, fields)
+    read_non_stream(url, fields)
 
 
 if __name__ == "__main__":

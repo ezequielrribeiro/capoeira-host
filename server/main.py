@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
+from .app_client import AppClient, AppRegistrar
 from .bridge import BridgeServer
 from .config import Settings
 from .errors import OllamaError
@@ -31,6 +32,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         scheduler = RequestScheduler(bridge, queue_size=settings.queue_size, timeout=settings.timeout)
         registry = ModelRegistry(settings.models_file)
         gateway = Gateway(scheduler)
+        app_registrar = AppRegistrar()
+        app_client = AppClient(
+            host=settings.app_host,
+            port=settings.app_port,
+            path=settings.app_path,
+            timeout=settings.app_timeout,
+        )
+        background_tasks: set = set()
 
         app.state.settings = settings
         app.state.bridge = bridge
@@ -38,6 +47,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.registry = registry
         app.state.gateway = gateway
         app.state.watcher = watcher
+        app.state.app_registrar = app_registrar
+        app.state.app_client = app_client
+        app.state.background_tasks = background_tasks
 
         await bridge.start()
         try:

@@ -1,12 +1,13 @@
 # CapoeiraHost — Gateway Local ⇄ LLM Web via Browser Bridge
 
 **Projeto:** CapoeiraHost
-**Versão:** `2.1.0`
+**Versão:** `2.2.0`
 **Status:** `Approved`
-**Data:** 12 de Setembro de 2026
-**Revisão:** 2.1 — adiciona leitura do chat ativo (`/api/chat/read`) e gatilho de
-mudanças via long-poll (`/api/chat/watch`) alimentados por um watcher de DOM na
-extensão (`CHAT_UPDATE`).
+**Data:** 22 de Setembro de 2026
+**Revisão:** 2.2 — CapoeiraHost passa a operar **somente em modo push**: as
+respostas do LLM em `/api/generate` e `/api/chat` são entregues à API da
+aplicação (registrada ou porta padrão) via `POST JSON` (§5.7–5.8). Remove o
+long-poll `/api/chat/watch` e o buffer de eventos do watcher.
 
 ---
 
@@ -99,8 +100,11 @@ JSON** na comunicação — que as UIs Web costumam corromper.
    (novo chat por requisição por default), sem estado compartilhado indevido.
 4. **Segurança local**: loopback por padrão, validação de `Origin` no WebSocket,
    CORS restrito a localhost.
-5. **Streaming honesto**: texto puro transmitido em chunks (`STREAM_UPDATE` real ou
-   replay final), nunca NDJSON/JSON.
+5. **Entrega por push**: o chamador recebe `accepted` imediato; a resposta completa
+   é entregue à API da aplicação registrada (ou à porta padrão) via `POST JSON`,
+   nunca NDJSON, e `stream` é ignorado.
+6. **Best-effort**: falha no push (porta fechada, erro, timeout) é logada e
+   ignorada — nunca afeta o chamador.
 
 ---
 
@@ -111,13 +115,13 @@ JSON** na comunicação — que as UIs Web costumam corromper.
 | Modelo | **Perfil de provedor** no registry (`models.json`) — p.ex. `gemini-pro`, `claude-sonnet` |
 | Modelfile (TEMPLATE, SYSTEM, PARAMETER) | Campos do perfil: `provider`, `system_prompt`, `template`, `options` |
 | Inferência | *Remota* na interface Web do provedor |
-| `/api/generate` | Prompt único enviado à Web (transcript simples) |
-| `/api/chat` | Conversa serializada como transcript textual e enviada como 1 prompt (novo chat por requisição; opcionalmente reutiliza via `new_chat=false`) |
-| `stream=true` | Streaming de texto puro (replay final em chunks OU `STREAM_UPDATE` incremental se o adaptador suportar) |
+| `/api/generate` | Prompt único enviado à Web; retorna **ack** e entrega a resposta à aplicação via push |
+| `/api/chat` | Conversa serializada como transcript textual e enviada como 1 prompt (novo chat por requisição; opcionalmente reutiliza via `new_chat=false`); retorna **ack** e entrega a resposta à aplicação via push |
+| `stream=true` | Aceito mas **ignorado** — o host entrega o texto final completo no push (sem streaming ao chamador) |
 | `options` | Aceitos no form, mas **ignorados** no prompt (o host não injeta mais `[OPTIONS]`; parâmetros de amostragem não são aplicáveis à Web) |
 | Tool calling | Fora de escopo do host: **pass-through verbatim** — a ferramenta formata a instrução e interpreta a resposta por conta própria |
-| `/api/chat/read` | Lê o transcript atual do chat ativo na aba Web (turnos `[USER]`/`[ASSISTANT]`) |
-| `/api/chat/watch` | Gatilho de mudança: long-poll que devolve o delta quando uma mensagem nova aparece |
+| `/api/chat/read` | Lê o transcript atual do chat ativo na aba Web (turnos `[USER]`/`[ASSISTANT]`) — síncrono |
+| **Push de resposta** | Após o LLM retornar, o host faz `POST JSON` ao endpoint da aplicação registrada (ou à porta padrão) — ver §5.8 |
 
 ---
 
@@ -132,7 +136,10 @@ JSON** na comunicação — que as UIs Web costumam corromper.
 | `CAPOEIRA_TIMEOUT` | `180` | Timeout (s) por requisição antes de `504` |
 | `CAPOEIRA_QUEUE` | `10` | Máximo de requisições enfileiradas por provedor |
 | `CAPOEIRA_NEW_CHAT` | `true` | Inicia um chat novo na aba Web a cada requisição (padrão). Pode ser sobrescrito via `new_chat` no form de `/api/generate` e `/api/chat` |
-| `CAPOEIRA_WATCH_TIMEOUT` | `30` | Tempo máximo (s) que `POST /api/chat/watch` bloqueia antes de retornar vazio |
+| `CAPOEIRA_APP_HOST` | `127.0.0.1` | Host da API da aplicação usada quando **nenhuma** aplicação está registrada |
+| `CAPOEIRA_APP_PORT` | `8767` | Porta padrão da API da aplicação (fallback sem registro) |
+| `CAPOEIRA_APP_PATH` | `/api/capoeira/response` | Path do endpoint de resposta que a aplicação deve implementar |
+| `CAPOEIRA_APP_TIMEOUT` | `5` | Timeout (s) do push de resposta à aplicação |
 
 ---
 
@@ -193,7 +200,13 @@ Somente providers com bridge conectado:
 gemini-pro | provider=gemini | status=idle
 ```
 
-### 5.4. `POST /api/generate`
+### 5.4. `POST /api/generate` e `POST /api/chat` — modo push
+
+> A partir da revisão 2.2, o CapoeiraHost opera **somente em modo push** para as
+> rotas de geração. O chamador não recebe mais o texto da resposta no corpo HTTP
+> — recebe um **ack** imediato, e o texto é entregue à API da aplicação (§5.8).
+
+#### `/api/generate`
 
 Campos de form: `model`*, `prompt`*, `system`, `template`, `stream`
 (`true`/`false`), `new_chat` (`true`/`false`), `option.<chave>`.
@@ -201,20 +214,20 @@ Campos de form: `model`*, `prompt`*, `system`, `template`, `stream`
 ```bash
 curl -X POST http://127.0.0.1:8765/api/generate \
   -d model=gemini-pro \
-  --data-urlencode "prompt=Explique o que é capoeira em 1 parágrafo." \
-  --data-urlencode "option.temperature=0.5"
+  --data-urlencode "prompt=Explique o que é capoeira em 1 parágrafo."
 ```
 
-Resposta (não-stream):
+Resposta imediata (`text/plain`):
 
 ```text
-A capoeira é uma arte marcial afro-brasileira que combina dança, luta e música, reconhecida como patrimônio da humanidade.
+accepted: 8a2c1c55-7d1f-4a90-b3c2-0e1e8f2c4a1d
 ```
 
-Resposta (stream): o mesmo texto chega em **chunks** (`text/plain; charset=utf-8`),
-sem NDJSON e sem meta-dados.
+A geração roda em background; quando o LLM retorna, o texto é entregue **à
+aplicação** via push (§5.8). `stream` é aceito mas **ignorado** — a resposta
+completa vai no push.
 
-### 5.5. `POST /api/chat`
+#### `/api/chat`
 
 Campos de form: `model`*, pares repetidos `role`/`content`, `stream`, `new_chat`,
 `option.<chave>`.
@@ -227,19 +240,15 @@ curl -X POST http://127.0.0.1:8765/api/chat \
   -d new_chat=false
 ```
 
-Resposta (não-stream):
-
-```text
-Viveu no fim do século XIX no recôncavo baiano, tornando-se uma das maiores lendas da capoeira.
-```
+Resposta imediata: `accepted: <request_id>`, mesmo fluxo.
 
 > **Pass-through verbatim:** o CapoeiraHost não adiciona tags próprias ao que
 > recebe. O system prompt do perfil segue **verbatim** (sem `[SYSTEM]`,
 > `[OPTIONS]`, `[TOOLS]`). As mensagens são serializadas no transcript apenas com
 > os rótulos `[USER]`/`[ASSISTANT]` (role `system` entra como conteúdo puro), e a
-> resposta da Web é devolvida **verbatim**, sem qualquer parse. Qualquer
-> formatação/contrato é responsabilidade exclusiva da ferramenta que consome o
-> host. `role` fora de `user|assistant|system` → `400`.
+> resposta da Web é **entregue à aplicação verbatim**, sem qualquer parse.
+> Qualquer formatação/contrato é responsabilidade exclusiva da ferramenta que
+> consome o host. `role` fora de `user|assistant|system` → `400`.
 
 ### 5.6. `POST /api/chat/read` — ler o chat ativo
 
@@ -258,28 +267,55 @@ curl -X POST http://127.0.0.1:8765/api/chat/read -d model=gemini-pro
 
 Resposta inclui header `X-Capoeira-Revision` com a última revision conhecida do watcher.
 
-### 5.7. `POST /api/chat/watch` — gatilho de mudança (long-poll)
+### 5.7. Registro da aplicação (`/api/app/*`)
 
-Campos: `model`*, `revision` (última revision vista; default `0`), `timeout`
-(segundos; default `CAPOEIRA_WATCH_TIMEOUT`, limitado por ele).
+A aplicação que consome o CapoeiraHost pode **se registrar** informando a porta
+da **sua própria API REST** — o endpoint dessa API será **consumido pelo
+CapoeiraHost quando o LLM retornar**. É **slot único**: enquanto houver uma
+aplicação registrada, o host entrega a resposta **somente a ela**, até que o
+`unregister` a descadastre.
 
-Bloqueia até a extensão reportar um `CHAT_UPDATE` com `revision` maior que a
-informada (mensagem humana nova na aba Web) e devolve **somente o delta** como
-`text/plain` (`[USER]`/`[ASSISTANT]`), além do header `X-Capoeira-Revision`
-atualizado. Sem mudança dentro do `timeout` → `200` com **corpo vazio**.
+- `GET /api/app` → `name=... | host=... | port=...` ou `no app registered`.
+- `POST /api/app/register` — form `port`* (int 1–65535), `host` (default
+  `127.0.0.1`), `name` (opcional). Retorna `ok host=... port=...`.
+- `POST /api/app/unregister` — limpa o slot; o destino volta à porta padrão.
 
 ```bash
-curl -X POST http://127.0.0.1:8765/api/chat/watch \
-  -d model=gemini-pro -d revision=3 -d timeout=20
+curl -X POST http://127.0.0.1:8765/api/app/register \
+  -d port=8123 --data-urlencode "name=minha-app"
 ```
 
-> Mudanças **causadas pelo próprio agente** via `/api/chat` com `new_chat=false`
-> são silenciadas: enquanto o `SEND_PROMPT` está em andamento, o watcher apenas
-> ressincroniza o baseline (não emite `CHAT_UPDATE`), então não há eco da própria
-> resposta do agente. A detecção é leitura de DOM local — **nenhuma** requisição
-> extra é enviada ao LLM Web.
+**Caso nenhuma aplicação se registre**, o host **tenta** consumir a API da
+aplicação destino na **porta padrão** (`CAPOEIRA_APP_HOST`/`CAPOEIRA_APP_PORT`,
+default `127.0.0.1:8767`) — sempre **best-effort**: sem retry, falha só loga.
 
-### 5.8. `POST /api/show`
+### 5.8. Push de resposta (contrato da aplicação)
+
+A aplicação deve implementar **`POST <path>`** (`CAPOEIRA_APP_PATH`, default
+`/api/capoeira/response`), aceitando `application/json`:
+
+```json
+{
+  "request_id": "8a2c1c55-7d1f-4a90-b3c2-0e1e8f2c4a1d",
+  "model": "gemini-pro",
+  "provider": "gemini",
+  "endpoint": "chat",
+  "stream": false,
+  "text": "A capoeira é uma arte marcial afro-brasileira...",
+  "timestamp": "2026-09-22T12:00:00+00:00"
+}
+```
+
+- `text` é a resposta do LLM **verbatim** (§8). Em falha de geração (timeout,
+  error da extensão, fila cheia), `text` vem vazio e um campo `"error"` traz a
+  mensagem.
+- O push é **um disparo** (1 tentativa) com timeout `CAPOEIRA_APP_TIMEOUT`;
+  resposta `2xx` = ack. Falha de envio (porta fechada, erro HTTP, timeout) é
+  registrada em log e **ignorada** — nunca afeta quem chamou `generate`/`chat`.
+- A aplicação envia comandos ao LLM consumindo a API padrão (`/api/generate`,
+  `/api/chat`) e recebe os resultados de volta neste endpoint.
+
+### 5.9. `POST /api/show`
 
 Campo: `model`. Retorna bloco `text/plain`:
 
@@ -294,19 +330,19 @@ template: [INST] {{ .System }} [/INST]
 options: temperature=0.7; num_predict=2048
 ```
 
-### 5.9. `POST /api/create` — registrar perfil
+### 5.10. `POST /api/create` — registrar perfil
 
 Campos: `model`*, `from` (provedor ou perfil base), `system`, `template`,
 `parameter.<chave>` (ex.: `parameter.temperature=0.3`). Retorna `ok`.
 
-### 5.10. `POST /api/copy` e `DELETE /api/delete`
+### 5.11. `POST /api/copy` e `DELETE /api/delete`
 
 - `/api/copy`: campos `source`, `destination`.
 - `/api/delete`: campo `model`.
 
 Ambos retornam `ok`.
 
-### 5.11. Não aplicáveis (modelo não é hospedado)
+### 5.12. Não aplicáveis (modelo não é hospedado)
 
 | Endpoint | Status | Resposta (`text/plain`) |
 |---|---|---|
@@ -416,6 +452,10 @@ próprio agente em andamento, envia `CHAT_UPDATE` com `revision` incremental e o
 watcher apenas ressincroniza o baseline — sem eco. `revision` nunca reseta (é
 monotônico, mesmo em chat novo).
 
+> Na revisão 2.2, o `CHAT_UPDATE`/watcher alimenta **apenas** o header
+> `X-Capoeira-Revision` de `POST /api/chat/read` — não há mais long-poll
+> (`/api/chat/watch` foi removido).
+
 ### 6.2. Servidor → Extensão
 
 **`READ_CHAT`** — pedido on-demand do transcript atual (resposta via `RESPONSE`
@@ -454,12 +494,14 @@ correlacionado por `id`, payload `{ "transcript": [...] }`):
 
 1. Extensão abre aba do provedor → `content.js` conecta `ws://127.0.0.1:8766` → `HELLO`.
 2. Servidor marca `provider` como **disponível**. `/api/tags` lista todos; `/api/ps`
-   somente os online. Provider offline → `/api/generate` e `/api/chat` retornam `503`.
+   somente os online. Provider offline → `/api/generate` e `/api/chat` retornam `503`
+   (síncrono, antes do ack).
 3. Requisições HTTP por provider entram em fila FIFO (`CAPOEIRA_QUEUE`), uma geração por vez.
-4. Ao concluir, servidor envia `RESPONSE`/`STREAM_UPDATE` correlacionado por `id` e
-   finaliza a resposta HTTP (texto puro).
-5. Desconexão: servidor marca provider offline; requisições em andamento → `504`;
-   fila pendente → `503`. Extensão tenta reconexão com **exponential backoff**
+4. Ao concluir, servidor recebe `RESPONSE`/`STREAM_UPDATE` correlacionado por `id`, monta o
+   texto completo e **entrega à aplicação via push** (§5.8). O chamador da requisição já recebeu
+   `accepted: <request_id>` no passo 2.
+5. Desconexão: servidor marca provider offline; gerações em background falham e são reportadas
+   à aplicação (`error` no push). Extensão tenta reconexão com **exponential backoff**
    (base 1s → teto 30s).
 
 ---
@@ -504,8 +546,8 @@ verbatim** — não adiciona tags nem contratos próprios:
    `new_chat=true` reinicie a sessão.
 3. **Templates**: se o perfil define `template`, aplicado sobre `system + prompt`.
 
-4. **Resposta**: o texto da Web é devolvido **verbatim**, sem parse de
-   `[TOOL_CALL]` ou qualquer transformação.
+4. **Resposta**: o texto da Web é **entregue à aplicação verbatim** (via push,
+   §5.8), sem parse de `[TOOL_CALL]` ou qualquer transformação.
 
 > **Sem `format:"json"`:** não há mais `[MODE_JSON]`/`[JSON_START]`/`[JSON_END]` —
 > essa saída estruturada foi removida nesta revisão.
@@ -514,18 +556,20 @@ verbatim** — não adiciona tags nem contratos próprios:
 
 ## 9. Tratamento de Erros (text/plain)
 
-Todos os erros HTTP retornam corpo **`text/plain`** com a mensagem:
+Todos os erros **síncronos** de validação retornam corpo **`text/plain`** com a
+mensagem:
 
 | Caso | HTTP | Corpo (exemplo) |
 |---|---|---|
 | Campo obrigatório ausente / role inválido | `400` | `campo 'model' é obrigatório` |
 | Modelo não registrado | `404` | `model 'x' not found` |
 | Provider sem bridge conectado | `503` | `no bridge available for provider 'gemini'` |
-| Fila cheia para o provider | `503` | `bridge queue full (10)` |
-| Timeout de geração na Web | `504` | `bridge timeout after the configured window` |
-| Extensão reportou `ERROR` | `502` | mensagem vinda da extensão |
-| `pull`/`push`/`blobs`/`embed` | `501` | ver §5.11 |
+| `pull`/`push`/`blobs`/`embed` | `501` | ver §5.12 |
 | Provider sem `supportsTranscript` | `501` | `no transcript support for provider '...'` |
+
+Erros de **geração em background** (fila cheia, timeout, error da extensão) **não**
+aparecem para o chamador (que já recebeu o `accepted`): são **entregues à
+aplicação** no payload do push com `"text": ""` e o campo `"error"` (§5.8).
 
 ---
 
@@ -538,13 +582,18 @@ Todos os erros HTTP retornam corpo **`text/plain`** com a mensagem:
 - **RNF-03 (Atomicidade):** cada requisição HTTP mapeia 1:1 para um ciclo
   `SEND_PROMPT → RESPONSE` com `id` correlacionado; por padrão novo chat por
   requisição (`new_chat=true`).
-- **RNF-04 (Streaming):** `stream=true` responde **texto puro** em chunks (replay
-  final ou `STREAM_UPDATE` incremental); nunca NDJSON.
-- **RNF-05 (Latência):** `executionTimeMs` da resposta vira meta-dado interno; o corpo
-  entregue ao cliente é somente texto.
+- **RNF-04 (Streaming):** `stream=true` é aceito mas **ignorado** no modo push —
+  a resposta completa é entregue à aplicação no payload do push; nunca NDJSON.
+- **RNF-05 (Latência):** `executionTimeMs` da resposta vira meta-dado interno; o
+  chamador recebe apenas o ack e o texto via push.
 - **RNF-06 (Texto puro):** **nenhum JSON** entre agente local, gateway e UI Web;
   o texto trafega **verbatim** (pass-through), sem tags nem contrato adicionados
-  pelo host.
+  pelo host. JSON permanece apenas no WebSocket bridge (host⇄extensão) e no
+  **contrato de push host⇄aplicação** (§5.8).
+- **RNF-07 (Push best-effort):** a entrega à aplicação é um disparo com timeout;
+  falha (porta fechada, erro HTTP, timeout) é logada e **ignorada** — nunca
+  afeta o chamador e nunca faz retry. Registro da aplicação é slot único e
+  exclusivo até `unregister`.
 
 ---
 
@@ -558,10 +607,11 @@ capoeira-host/
 │   ├── config.py             # env vars, binds, portas
 │   ├── registry.py           # Model Registry (models.json, JSON de config)
 │   ├── ollama_dto.py         # dataclasses mínimas de request (sem models JSON)
-│   ├── http_api.py           # rotas textuais (form-urlencoded → text/plain)
+│   ├── http_api.py           # rotas textuais (form-urlencoded → text/plain + /api/app)
 │   ├── bridge.py             # WS server 8766, allowlist de Origin, headers PNA, correlação id
 │   ├── gateway.py            # form → SEND_PROMPT → texto → RESPONSE/STREAM_UPDATE
-│   ├── watcher.py            # ChatWatcher: ingest de CHAT_UPDATE, estado por provider, long-poll
+│   ├── watcher.py            # ChatWatcher: ingest de CHAT_UPDATE, revision por provider
+│   ├── app_client.py         # AppRegistrar (slot único) + AppClient (push JSON §5.8)
 │   ├── queue.py              # FIFO por provider + locks
 │   ├── prompt_builder.py     # system verbatim, transcript, template
 │   └── errors.py             # erros text/plain padronizados
@@ -575,9 +625,10 @@ capoeira-host/
 │       ├── chatgpt.js
 │       └── copilot365.js
 ├── tests/
-│   └── test_integration.py   # suíte de integração (form → text/plain + WS fake)
+│   ├── test_integration.py   # suíte de integração (push e2e + WS fake)
+│   └── test_app_registry.py  # registro da aplicação + contrato de push
 ├── conftest.py
-├── smoke_test.py             # smoke test da API (form → texto)
+├── smoke_test.py             # smoke test da API (form → ack)
 ├── models.json               # registry de perfis (JSON de config)
 ├── requirements.txt          # fastapi · uvicorn · websockets · pydantic · python-multipart
 ├── requirements-dev.txt      # pytest · httpx
@@ -597,11 +648,18 @@ python -m server.main
 
 # 2. Carregar a extensão no Chrome e abrir uma aba autenticada do Gemini.
 
-# 3. Testar — script cross-platform (README §Testar)
+# 3. (opcional) Registrar a aplicação que receberá as respostas
+curl -X POST http://127.0.0.1:8765/api/app/register -d port=8123
+
+# 4. Testar — script cross-platform (README §Testar)
 python smoke_test.py --endpoint generate --prompt "Explique o que é capoeira em 1 parágrafo."
-python smoke_test.py --endpoint chat --stream
+python smoke_test.py --endpoint chat
 curl http://127.0.0.1:8765/api/version
 ```
+
+> O `generate`/`chat` respondem `accepted: <request_id>`; a resposta do LLM chega
+> via `POST JSON` na API da aplicação (`/api/capoeira/response`), ou na porta
+> padrão `CAPOEIRA_APP_PORT` se nenhuma aplicação estiver registrada.
 
 > **Após alterar o código:** reinicie o servidor e, ao (re)carregar a extensão,
 > **recarregue a aba do provedor** — o WebSocket do content script usa a origem da
@@ -630,4 +688,4 @@ curl http://127.0.0.1:8765/api/version
 - Redução de contexto (Tree-Sitter/AST, skeleton, grafos de dependência).
 - Aplicador de diffs / escrita em arquivos locais.
 - Embeddings, upload de imagens, pull/push de modelos. *(Tool calling nativo não é
-  suportado pelo host; o texto é pass-through verbatim — ver §5.5.)*
+  suportado pelo host; o texto é pass-through verbatim — ver §5.4.)*
