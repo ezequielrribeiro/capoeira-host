@@ -1,6 +1,6 @@
 window.registerAdapter = function (adapter) {
   window.CapoeiraHostAdapters = window.CapoeiraHostAdapters || [];
-  window.CapoeiraHostAdapters.push(adapter);
+  window.CapoeiraHostAdapters.push({ ...window.CapoeiraAdapterBase, ...adapter });
 };
 
 function collectTranscript(selectors) {
