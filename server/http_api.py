@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 
+from .app_client import build_push_payload
 from .errors import BadRequest, BridgeOffline, UnsupportedError
 from .gateway import Gateway
 from .ollama_dto import VERSION, ChatMessage, ChatRequest, GenerateRequest
@@ -86,18 +86,15 @@ def _push_payload(
     stream: bool,
     error: str | None = None,
 ) -> dict:
-    payload = {
-        "request_id": request_id,
-        "model": profile.name,
-        "provider": profile.provider,
-        "endpoint": endpoint,
-        "stream": stream,
-        "text": text,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    if error is not None:
-        payload["error"] = error
-    return payload
+    return build_push_payload(
+        request_id=request_id,
+        model=profile.name,
+        provider=profile.provider,
+        endpoint=endpoint,
+        text=text,
+        stream=stream,
+        error=error,
+    )
 
 
 async def _push_result(

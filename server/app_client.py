@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from urllib import request as urllib_request
@@ -17,6 +18,34 @@ class RegisteredApp:
     name: str = ""
     host: str = "127.0.0.1"
     port: int = 0
+
+
+def build_push_payload(
+    request_id: str,
+    model: str,
+    provider: str,
+    endpoint: str,
+    text: str,
+    stream: bool,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Monta o corpo JSON do contrato de push (§5.8).
+
+    Único ponto de construção do payload, compartilhado entre as respostas de
+    geração (``/api/generate``/``/api/chat``) e os turnos detectados pelo
+    watcher (``CHAT_UPDATE``)."""
+    payload: dict[str, Any] = {
+        "request_id": request_id,
+        "model": model,
+        "provider": provider,
+        "endpoint": endpoint,
+        "stream": stream,
+        "text": text,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if error is not None:
+        payload["error"] = error
+    return payload
 
 
 class AppRegistrar:

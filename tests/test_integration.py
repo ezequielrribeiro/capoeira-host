@@ -70,6 +70,7 @@ def app(models_file):
         timeout=5.0,
         queue_size=10,
         app_port=28767,
+        watch_settle=0.1,
     )
     return create_app(settings)
 
@@ -84,6 +85,7 @@ def app_reuse_chat(models_file):
         queue_size=10,
         new_chat=False,
         app_port=28767,
+        watch_settle=0.1,
     )
     return create_app(settings)
 
@@ -452,6 +454,90 @@ def test_streaming_plain_text_pushed_complete(app):
             assert payload["text"] == "A capoeira é uma arte."
             assert payload["stream"] is True
             assert wait_received(ctx), "bridge não recebeu SEND_PROMPT"
+    finally:
+        thread.join(timeout=10)
+
+
+# --------------------------------------------- watcher → app (turnos da Web) --
+
+
+def test_chat_update_relayed_to_registered_app(app):
+    """Turno do assistente detectado pelo watcher (conversa digitada na Web,
+    sem SEND_PROMPT do host) é relayado à aplicação registrada via push."""
+    update = {
+        "provider": "gemini",
+        "revision": 1,
+        "transcript": [
+            {"role": "user", "content": "Liste os arquivos."},
+            {"role": "assistant", "content": "[TOOL_CALL] list_dir | path='.'"},
+        ],
+        "messages": [
+            {"role": "user", "content": "Liste os arquivos."},
+            {"role": "assistant", "content": "[TOOL_CALL] list_dir | path='.'"},
+        ],
+    }
+    thread, ctx = start_fake_bridge("gemini", "irrelevante", chat_updates=[update])
+    try:
+        with TestClient(app) as client, FakeApp() as fake_app:
+            register_app(client, fake_app)
+            payload = fake_app.wait_payload()
+            assert payload is not None, "CHAT_UPDATE não foi relayado à app"
+            assert payload["model"] == "gemini-pro"
+            assert payload["provider"] == "gemini"
+            assert payload["endpoint"] == "chat"
+            assert "[TOOL_CALL] list_dir" in payload["text"]
+            assert "error" not in payload
+            assert "request_id" in payload
+    finally:
+        thread.join(timeout=10)
+
+
+def test_chat_update_partials_coalesced(app):
+    """Múltiplos CHAT_UPDATE parciais do mesmo turno viram um único push com o
+    texto final (debounce evita executar comando truncado)."""
+
+    def upd(text, rev):
+        return {
+            "provider": "gemini",
+            "revision": rev,
+            "transcript": [{"role": "assistant", "content": text}],
+            "messages": [{"role": "assistant", "content": text}],
+        }
+
+    updates = [
+        upd("[TOOL_CALL] list_dir | path='", 1),
+        upd("[TOOL_CALL] list_dir | path='.'", 2),
+        upd("[TOOL_CALL] list_dir | path='.' ainda", 3),
+    ]
+    thread, ctx = start_fake_bridge("gemini", "irrelevante", chat_updates=updates)
+    try:
+        with TestClient(app) as client, FakeApp() as fake_app:
+            register_app(client, fake_app)
+            deadline = time.monotonic() + POLL_TIMEOUT
+            while time.monotonic() < deadline and not fake_app.payloads:
+                time.sleep(0.05)
+            time.sleep(0.3)  # dá tempo de eventuais pushes extras
+            with fake_app.lock:
+                payloads = list(fake_app.payloads)
+            assert len(payloads) == 1, f"esperava 1 push, veio {len(payloads)}"
+            assert payloads[0]["text"] == "[TOOL_CALL] list_dir | path='.' ainda"
+    finally:
+        thread.join(timeout=10)
+
+
+def test_chat_update_without_assistant_not_pushed(app):
+    """CHAT_UPDATE só com turnos de usuário não gera push à aplicação."""
+    update = {
+        "provider": "gemini",
+        "revision": 1,
+        "transcript": [{"role": "user", "content": "oi"}],
+        "messages": [{"role": "user", "content": "oi"}],
+    }
+    thread, ctx = start_fake_bridge("gemini", "irrelevante", chat_updates=[update])
+    try:
+        with TestClient(app) as client, FakeApp() as fake_app:
+            register_app(client, fake_app)
+            assert fake_app.wait_payload(timeout=1.0) is None
     finally:
         thread.join(timeout=10)
 

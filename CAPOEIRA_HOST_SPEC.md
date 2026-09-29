@@ -140,6 +140,7 @@ JSON** na comunicação — que as UIs Web costumam corromper.
 | `CAPOEIRA_APP_PORT` | `8767` | Porta padrão da API da aplicação (fallback sem registro) |
 | `CAPOEIRA_APP_PATH` | `/api/capoeira/response` | Path do endpoint de resposta que a aplicação deve implementar |
 | `CAPOEIRA_APP_TIMEOUT` | `5` | Timeout (s) do push de resposta à aplicação |
+| `CAPOEIRA_WATCH_SETTLE` | `1.0` | Janela (s) de debounce do relay de `CHAT_UPDATE` (§6.1): o host espera o texto do assistente estabilizar antes de empurrá-lo à aplicação |
 
 ---
 
@@ -314,6 +315,11 @@ A aplicação deve implementar **`POST <path>`** (`CAPOEIRA_APP_PATH`, default
   registrada em log e **ignorada** — nunca afeta quem chamou `generate`/`chat`.
 - A aplicação envia comandos ao LLM consumindo a API padrão (`/api/generate`,
   `/api/chat`) e recebe os resultados de volta neste endpoint.
+- **Turnos detectados no watcher:** quando o usuário conversa **direto na aba
+  Web** e a LLM responde, o `CHAT_UPDATE` da extensão é relayado como um push
+  neste mesmo endpoint (`endpoint=chat`, `request_id` novo) com o texto das
+  mensagens de **assistente** do delta. É o canal para a aplicação reagir a
+  comandos de ferramenta emitidos fora de uma requisição do host (§6.1).
 
 ### 5.9. `POST /api/show`
 
@@ -452,9 +458,15 @@ próprio agente em andamento, envia `CHAT_UPDATE` com `revision` incremental e o
 watcher apenas ressincroniza o baseline — sem eco. `revision` nunca reseta (é
 monotônico, mesmo em chat novo).
 
-> Na revisão 2.2, o `CHAT_UPDATE`/watcher alimenta **apenas** o header
-> `X-Capoeira-Revision` de `POST /api/chat/read` — não há mais long-poll
-> (`/api/chat/watch` foi removido).
+> O `CHAT_UPDATE`/watcher alimenta o header `X-Capoeira-Revision` de
+> `POST /api/chat/read` **e** é relayado à aplicação registrada: os turnos de
+> **assistente** do delta viram um push (§5.8, `endpoint=chat`). É assim que a
+> aplicação recebe respostas de conversas digitadas **direto na aba Web** (que o
+> host não iniciou) — não há mais long-poll (`/api/chat/watch` foi removido).
+> Como a LLM gera de forma incremental, o host faz um **debounce**
+> (`CAPOEIRA_WATCH_SETTLE`, default 1s) e só empurra o texto já estabilizado, em
+> task própria (não bloqueia o bridge). Turnos de usuário puros não geram push;
+> o relay é best-effort como os demais.
 
 ### 6.2. Servidor → Extensão
 

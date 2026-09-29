@@ -28,3 +28,4 @@ class Settings:
     app_port: int = field(default_factory=lambda: int(_env("CAPOEIRA_APP_PORT", "8767")))
     app_path: str = field(default_factory=lambda: _env("CAPOEIRA_APP_PATH", "/api/capoeira/response"))
     app_timeout: float = field(default_factory=lambda: float(_env("CAPOEIRA_APP_TIMEOUT", "5")))
+    watch_settle: float = field(default_factory=lambda: float(_env("CAPOEIRA_WATCH_SETTLE", "1.0")))

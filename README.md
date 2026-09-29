@@ -195,6 +195,7 @@ print(r.text)
 | `CAPOEIRA_APP_PORT` | `8767` | Porta padrão da API da aplicação quando nenhuma aplicação se registra |
 | `CAPOEIRA_APP_PATH` | `/api/capoeira/response` | Path do endpoint que a aplicação deve implementar (contrato de resposta) |
 | `CAPOEIRA_APP_TIMEOUT` | `5` | Timeout (s) do push de resposta à aplicação |
+| `CAPOEIRA_WATCH_SETTLE` | `1.0` | Debounce (s) do relay de `CHAT_UPDATE` à aplicação (turnos digitados na aba Web) |
 
 Exemplo:
 
@@ -341,6 +342,11 @@ Em falha de geração (timeout, error da extensão), o payload chega com `text`
 vazio e um campo `"error"`. Responder `2xx` confirma o recebimento; o push é
 **best-effort** (sem retry), e uma falha no envio nunca afeta quem chamou
 `generate`/`chat`.
+
+Além das respostas às requisições que o host iniciou, o host também **relaya**
+à aplicação os turnos de **assistente** detectados pelo watcher na aba Web
+(conversa digitada diretamente no navegador) — mesmo contrato de payload
+(`endpoint=chat`, novo `request_id`). Turnos apenas de usuário não geram push.
 
 #### `POST /api/app/unregister` — descadastrar
 
