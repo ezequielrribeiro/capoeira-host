@@ -86,7 +86,7 @@
       if (payload.newChat && adapter.supportsNewChat) {
         await adapter.startNewChat();
         systemHeadersSeeded = false;
-        syncBaseline();
+        await syncBaseline();
       }
       const system = systemHeadersSeeded ? "" : (payload.systemPrompt || "");
       const fullPrompt = `${system}\n\n${payload.prompt || ""}`.trim();
@@ -96,8 +96,14 @@
     } catch (err) {
       sendMessage(msg.id, "ERROR", null, String((err && err.message) || err));
     } finally {
-      inFlightRequest = false;
-      syncBaseline();
+      // Atualiza o baseline ANTES de liberar a supressão: senão o watchTick
+      // pode ver o turno recém-gerado como delta e relayá-lo como push novo
+      // (o agente reexecutaria o próprio comando).
+      try {
+        await syncBaseline();
+      } finally {
+        inFlightRequest = false;
+      }
     }
   }
 
@@ -180,12 +186,15 @@
     baselineDigest = null;
   }
 
-  function syncBaseline() {
+  async function syncBaseline() {
     const adapter = getActiveAdapter();
     if (!adapter || !adapter.supportsTranscript) return;
-    adapter.extractTranscript().then((transcript) => {
+    try {
+      const transcript = await adapter.extractTranscript();
       baselineDigest = digestOf(transcript);
-    }).catch(() => {});
+    } catch (err) {
+      // best-effort: mantém o baseline anterior
+    }
   }
 
   function digestOf(transcript) {
@@ -198,7 +207,7 @@
       return;
     }
     if (inFlightRequest) {
-      syncBaseline();
+      await syncBaseline();
       return;
     }
 
