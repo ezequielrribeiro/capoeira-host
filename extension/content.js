@@ -5,6 +5,7 @@
   const POLL_INTERVAL_MS = 500;
   const WATCH_INTERVAL_MS = 800;
   const SETTLE_MS = 400;
+  const RESPONSE_TIMEOUT_MS = 120000;
 
   let socket = null;
   let reconnectDelay = RECONNECT_BASE_MS;
@@ -90,9 +91,10 @@
       }
       const system = systemHeadersSeeded ? "" : (payload.systemPrompt || "");
       const fullPrompt = `${system}\n\n${payload.prompt || ""}`.trim();
+      const baselineText = (await adapter.extractLastResponse().catch(() => "")) || "";
       await adapter.injectText(fullPrompt);
       systemHeadersSeeded = true;
-      await waitForCompletion(adapter, msg.id, startedAt);
+      await waitForCompletion(adapter, msg.id, startedAt, baselineText);
     } catch (err) {
       sendMessage(msg.id, "ERROR", null, String((err && err.message) || err));
     } finally {
@@ -121,9 +123,11 @@
     }
   }
 
-  async function waitForCompletion(adapter, requestId, startedAt) {
+  async function waitForCompletion(adapter, requestId, startedAt, baselineText) {
     const sel = adapter.getSelectors();
+    const baseline = (baselineText || "").trim();
     let lastText = "";
+    let sawGeneration = false;
 
     const interval = setInterval(async () => {
       try {
@@ -131,7 +135,9 @@
           typeof adapter.isGenerating === "function"
             ? adapter.isGenerating()
             : !!document.querySelector(sel.stopGeneratingIndicator);
-        const current = await adapter.extractLastResponse();
+        const current = (await adapter.extractLastResponse()) || "";
+
+        if (isGenerating) sawGeneration = true;
 
         if (adapter.supportsStreaming && current && current.length > lastText.length) {
           const partial = current.slice(lastText.length);
@@ -147,7 +153,18 @@
           );
         }
 
-        if (!isGenerating) {
+        if (Date.now() - startedAt > RESPONSE_TIMEOUT_MS) {
+          clearInterval(interval);
+          sendMessage(requestId, "ERROR", null, "timeout aguardando a resposta do modelo.");
+          return;
+        }
+
+        // Só conclui quando a geração realmente começou (ou a última resposta
+        // mudou em relação ao baseline). Sem isso, a poll curta logo após o
+        // envio captura a resposta ANTERIOR e o agente reexecuta o comando
+        // antigo — loop de reexecução.
+        const changed = current.trim() !== baseline;
+        if (!isGenerating && (sawGeneration || changed)) {
           clearInterval(interval);
           await new Promise((r) => setTimeout(r, SETTLE_MS));
           const finalText = await adapter.extractLastResponse();
