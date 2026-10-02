@@ -5,9 +5,9 @@ Envia uma requisição à API textual (form-urlencoded + text/plain) e exibe o
 retorno. Usa apenas a biblioteca padrão, sem dependências extras e sem
 problemas de quoting de shell.
 
-Em modo push, ``generate``/``chat`` retornam um ack (``accepted: <request_id>``)
-imediatamente; a resposta do LLM é entregue à API da aplicação registrada (ou à
-porta padrão se nenhuma aplicação estiver registrada).
+Em modo síncrono, ``generate``/``chat`` aguardam a geração na Web e devolvem o
+texto do LLM no corpo da resposta (``text/plain``). ``read`` lê o transcript
+atual do chat ativo.
 
 Uso:
     python smoke_test.py
@@ -80,7 +80,7 @@ def handle_http_error(exc: urllib.error.HTTPError) -> None:
 
 def read_non_stream(url: str, fields: list[tuple[str, str]]) -> None:
     try:
-        with urllib.request.urlopen(build_request(url, fields)) as resp:
+        with urllib.request.urlopen(build_request(url, fields), timeout=args.timeout) as resp:
             print(f"HTTP {resp.status} ({resp.headers.get('Content-Type', '')})")
             revision = resp.headers.get("X-Capoeira-Revision")
             if revision:
@@ -106,6 +106,12 @@ def main() -> None:
         default=None,
         help="Sobrescreve CAPOEIRA_NEW_CHAT por requisição (ausente = default do servidor).",
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=180.0,
+        help="Tempo máximo de espera pela geração síncrona (segundos).",
+    )
     args = parser.parse_args()
 
     fields = build_fields(args)
@@ -117,6 +123,8 @@ def main() -> None:
     print("Solicitação:")
     for key, value in fields:
         print(f"  {key} = {value}")
+    if args.endpoint != "read":
+        print(f"(resposta síncrona — aguarda a geração no navegador até {args.timeout:g}s)")
     print("=" * 40)
 
     read_non_stream(url, fields)

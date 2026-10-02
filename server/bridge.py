@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import Awaitable, Callable
 
 import websockets
 
@@ -64,14 +63,12 @@ class BridgeServer:
         self,
         host: str,
         port: int,
-        on_chat_update: Callable[[str, dict], Awaitable[None]] | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.sessions: dict[str, BridgeSession] = {}
         self.pending: dict[str, PendingRequest] = {}
         self._sock_to_provider: dict[object, str] = {}
-        self._on_chat_update = on_chat_update
         self._server = None
 
     async def start(self) -> None:
@@ -128,8 +125,6 @@ class BridgeServer:
                 action = msg.get("action")
                 if action == "HELLO":
                     self._register(websocket, msg.get("payload") or {})
-                elif action == "CHAT_UPDATE":
-                    await self._dispatch_chat_update(websocket, msg)
                 elif action in ("RESPONSE", "STREAM_UPDATE", "ERROR"):
                     self._dispatch(msg)
         finally:
@@ -149,12 +144,6 @@ class BridgeServer:
             self._fail_pending(old, BridgeError(f"bridge session replaced (provider '{provider}')"))
         self.sessions[provider] = BridgeSession(websocket, provider, payload)
         self._sock_to_provider[websocket] = provider
-
-    async def _dispatch_chat_update(self, websocket, msg: dict) -> None:
-        provider = self._sock_to_provider.get(websocket) or (msg.get("payload") or {}).get("provider")
-        if not provider or self._on_chat_update is None:
-            return
-        await self._on_chat_update(provider, msg.get("payload") or {})
 
     def _dispatch(self, msg: dict) -> None:
         request_id = msg.get("id")

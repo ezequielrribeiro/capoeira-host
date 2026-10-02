@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import time
 import uuid
-from typing import Awaitable, Callable
+from typing import Callable
 
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 
-from .app_client import build_push_payload
 from .errors import BadRequest, BridgeOffline, UnsupportedError
 from .gateway import Gateway
 from .ollama_dto import VERSION, ChatMessage, ChatRequest, GenerateRequest
@@ -57,10 +55,9 @@ def _require_online(bridge, provider: str) -> None:
 
 
 def _set_revision_header(request: Request, profile: Profile, response: PlainTextResponse) -> None:
-    watcher = request.app.state.watcher
-    state = watcher.latest(profile.provider)
-    if state is not None:
-        response.headers["X-Capoeira-Revision"] = str(state.revision)
+    revision = getattr(request.app.state, "revision", None)
+    if revision is not None:
+        response.headers["X-Capoeira-Revision"] = str(revision)
 
 
 def _parse_messages(form) -> list[ChatMessage]:
@@ -73,75 +70,6 @@ def _parse_messages(form) -> list[ChatMessage]:
         elif key == "content" and current is not None:
             current.content = value
     return [m for m in messages if m.role in ALLOWED_CHAT_ROLES]
-
-
-# ------------------------------------------------------------------ push (resposta do LLM → API da aplicação)
-
-
-def _push_payload(
-    request_id: str,
-    profile: Profile,
-    endpoint: str,
-    text: str,
-    stream: bool,
-    error: str | None = None,
-) -> dict:
-    return build_push_payload(
-        request_id=request_id,
-        model=profile.name,
-        provider=profile.provider,
-        endpoint=endpoint,
-        text=text,
-        stream=stream,
-        error=error,
-    )
-
-
-async def _push_result(
-    request: Request,
-    request_id: str,
-    profile: Profile,
-    endpoint: str,
-    text: str,
-    stream: bool,
-    error: str | None = None,
-) -> None:
-    app_client = request.app.state.app_client
-    registrar = request.app.state.app_registrar
-    await app_client.notify(
-        registrar.current(),
-        _push_payload(request_id, profile, endpoint, text, stream, error=error),
-    )
-
-
-async def _dispatch(
-    request: Request,
-    request_id: str,
-    profile: Profile,
-    endpoint: str,
-    stream: bool,
-    generate: Callable[[], Awaitable[str]],
-) -> None:
-    """Executa a geração do LLM em background e entrega o resultado à aplicação."""
-    try:
-        text = await generate()
-        await _push_result(request, request_id, profile, endpoint, text, stream)
-    except Exception as exc:  # noqa: BLE001 - erro de geração é reportado à aplicação
-        await _push_result(
-            request,
-            request_id,
-            profile,
-            endpoint,
-            "",
-            stream,
-            error=getattr(exc, "message", None) or str(exc),
-        )
-
-
-def _schedule_generation(request: Request, coro: Awaitable[None]) -> None:
-    task = asyncio.create_task(coro)
-    request.app.state.background_tasks.add(task)
-    task.add_done_callback(request.app.state.background_tasks.discard)
 
 
 def build_router() -> APIRouter:
@@ -179,34 +107,6 @@ def build_router() -> APIRouter:
             lines.append(f"{p.name} | provider={p.provider} | status={status}")
         return PlainTextResponse("\n".join(lines))
 
-    # ------------------------------------------------------------------ app (registro da aplicação)
-
-    @router.get("/api/app")
-    def app_status(request: Request) -> PlainTextResponse:
-        app = request.app.state.app_registrar.current()
-        if app is None:
-            return PlainTextResponse("no app registered")
-        return PlainTextResponse(f"name={app.name or 'unnamed'} | host={app.host} | port={app.port}")
-
-    @router.post("/api/app/register")
-    async def app_register(request: Request) -> PlainTextResponse:
-        form = await request.form()
-        try:
-            port = int((form.get("port") or "").strip())
-        except ValueError:
-            raise BadRequest("campo 'port' deve ser um inteiro")
-        if not (0 < port < 65536):
-            raise BadRequest("campo 'port' deve estar entre 1 e 65535")
-        host = (form.get("host") or "").strip() or "127.0.0.1"
-        name = (form.get("name") or "").strip()
-        app = request.app.state.app_registrar.register(port, host=host, name=name)
-        return PlainTextResponse(f"ok host={app.host} port={app.port}")
-
-    @router.post("/api/app/unregister")
-    async def app_unregister(request: Request) -> PlainTextResponse:
-        request.app.state.app_registrar.unregister()
-        return PlainTextResponse("ok")
-
     # ------------------------------------------------------------------ generate
 
     @router.post("/api/generate", response_model=None)
@@ -238,17 +138,8 @@ def build_router() -> APIRouter:
             options=_parse_options(form),
         )
 
-        request_id = str(uuid.uuid4())
-        coro = _dispatch(
-            request,
-            request_id,
-            profile,
-            "generate",
-            req.stream,
-            lambda: gateway.generate(profile, req, deadline, new_chat=new_chat),
-        )
-        _schedule_generation(request, coro)
-        return PlainTextResponse(f"accepted: {request_id}")
+        text = await gateway.generate(profile, req, deadline, new_chat=new_chat)
+        return PlainTextResponse(text)
 
     # ------------------------------------------------------------------ chat
 
@@ -282,17 +173,8 @@ def build_router() -> APIRouter:
             options=_parse_options(form),
         )
 
-        request_id = str(uuid.uuid4())
-        coro = _dispatch(
-            request,
-            request_id,
-            profile,
-            "chat",
-            req.stream,
-            lambda: gateway.chat(profile, req, deadline, new_chat=new_chat),
-        )
-        _schedule_generation(request, coro)
-        return PlainTextResponse(f"accepted: {request_id}")
+        text = await gateway.chat(profile, req, deadline, new_chat=new_chat)
+        return PlainTextResponse(text)
 
     # ------------------------------------------------------------------ read chat
 

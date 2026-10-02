@@ -41,18 +41,8 @@ class Gateway:
         system = build_system_envelope(req.system or profile.system_prompt)
         prompt = apply_template(req.template or profile.template, system, req.prompt)
         payload = build_prompt_payload(profile, system, prompt, new_chat=new_chat)
-        transmitted = ""
-        async for kind, text, done_payload in self._run(profile, payload, deadline):
-            if kind == "text":
-                transmitted += text
-                yield text
-            else:
-                full = (done_payload or {}).get("rawResponse") or ""
-                delta = full[len(transmitted):]
-                if delta:
-                    transmitted += delta
-                    yield delta
-                return
+        async for piece in self._stream(profile, payload, deadline):
+            yield piece
 
     async def generate(self, profile: Profile, req: GenerateRequest, deadline: float, new_chat: bool = True) -> str:
         chunks: list[str] = []
@@ -67,6 +57,20 @@ class Gateway:
         transcript = build_chat_transcript(req.messages)
         prompt = apply_template(profile.template, system, transcript)
         payload = build_prompt_payload(profile, system, prompt, new_chat=new_chat)
+        async for piece in self._stream(profile, payload, deadline):
+            yield piece
+
+    async def chat(self, profile: Profile, req: ChatRequest, deadline: float, new_chat: bool = True) -> str:
+        chunks: list[str] = []
+        async for piece in self.chat_text(profile, req, deadline, new_chat=new_chat):
+            chunks.append(piece)
+        return "".join(chunks)
+
+    # ------------------------------------------------------------------ interno
+
+    async def _stream(self, profile: Profile, payload: dict, deadline: float) -> AsyncGenerator[str, None]:
+        """Drena os eventos do bridge, emitindo o texto incremental uma única vez
+        (``RESPONSE`` final serve de fonte da verdade; evita duplicar parciais)."""
         transmitted = ""
         async for kind, text, done_payload in self._run(profile, payload, deadline):
             if kind == "text":
@@ -79,12 +83,6 @@ class Gateway:
                     transmitted += delta
                     yield delta
                 return
-
-    async def chat(self, profile: Profile, req: ChatRequest, deadline: float, new_chat: bool = True) -> str:
-        chunks: list[str] = []
-        async for piece in self.chat_text(profile, req, deadline, new_chat=new_chat):
-            chunks.append(piece)
-        return "".join(chunks)
 
     # ------------------------------------------------------------------ read chat
 
